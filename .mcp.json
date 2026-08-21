@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "board": {
+      "command": "bun",
+      "args": ["run", "packages/mcp/src/index.ts"],
+      "env": {
+        "LOG_LEVEL": "info"
+      }
+    }
+  }
+}

@@ -1,0 +1,147 @@
+/** Mirrors the wire format from @automation/core. Kept local so the web build stays standalone. */
+export type DurationKind = "day" | "week" | "month" | "quarter" | "year" | "custom";
+export type ColumnKind = "backlog" | "active" | "blocked" | "review" | "done";
+export type Priority = "low" | "medium" | "high" | "urgent";
+
+export interface User {
+  id: string;
+  displayName: string;
+  kind: "human" | "agent";
+  createdAt: string;
+}
+
+export interface Board {
+  id: string;
+  name: string;
+  description: string | null;
+  durationKind: DurationKind;
+  startsAt: string;
+  endsAt: string;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BoardColumn {
+  id: string;
+  boardId: string;
+  key: string;
+  name: string;
+  kind: ColumnKind;
+  position: number;
+  wipLimit: number | null;
+  createdAt: string;
+}
+
+export interface Task {
+  id: string;
+  boardId: string;
+  columnId: string;
+  title: string;
+  description: string | null;
+  assigneeId: string | null;
+  createdBy: string;
+  priority: Priority;
+  dueAt: string | null;
+  position: number;
+  completedAt: string | null;
+  blockedReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskWithContext extends Task {
+  boardName: string;
+  boardEndsAt: string;
+  columnKey: string;
+  columnName: string;
+  columnKind: ColumnKind;
+  overdue: boolean;
+}
+
+export interface TaskComment {
+  id: string;
+  taskId: string;
+  authorId: string;
+  body: string;
+  createdAt: string;
+}
+
+export interface ActivityEntry {
+  id: number;
+  boardId: string | null;
+  taskId: string | null;
+  actorId: string | null;
+  action: string;
+  detail: Record<string, unknown> | null;
+  source: "web" | "mcp" | "system";
+  createdAt: string;
+}
+
+export interface BoardStats {
+  total: number;
+  done: number;
+  blocked: number;
+  review: number;
+  active: number;
+  backlog: number;
+  overdue: number;
+  assignedToMe: number;
+  assignedToClaude: number;
+  unassigned: number;
+}
+
+export interface BoardWindow {
+  startsAt: string;
+  endsAt: string;
+  label: string;
+  totalMs: number;
+  elapsedMs: number;
+  remainingMs: number;
+  progress: number;
+  expired: boolean;
+}
+
+export interface BoardDetail {
+  board: Board;
+  window: BoardWindow;
+  columns: BoardColumn[];
+  tasks: Task[];
+  stats: BoardStats;
+}
+
+export interface TaskDetail {
+  task: Task;
+  board: Board;
+  column: BoardColumn;
+  window: BoardWindow;
+  comments: TaskComment[];
+  overdue: boolean;
+}
+
+export const DURATION_LABELS: Record<DurationKind, string> = {
+  day: "One day",
+  week: "One week",
+  month: "One month",
+  quarter: "One quarter",
+  year: "One year",
+  custom: "Custom end date",
+};
+
+export const COLUMN_KIND_LABELS: Record<ColumnKind, string> = {
+  backlog: "Backlog",
+  active: "In progress",
+  blocked: "Blocked",
+  review: "Needs review",
+  done: "Done",
+};
+
+export const PRIORITY_LABELS: Record<Priority, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  urgent: "Urgent",
+};
+
+export const kindColor = (kind: ColumnKind): string => `var(--kind-${kind})`;
+export const priorityColor = (priority: Priority): string => `var(--prio-${priority})`;

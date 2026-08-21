@@ -1,0 +1,182 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens. Two palettes, one contract: every component reads these
+ * variables, so light/dark stays consistent without per-component overrides.
+ */
+:root {
+  --background: oklch(0.985 0.002 265);
+  --foreground: oklch(0.21 0.02 265);
+  --card: oklch(1 0 0);
+  --card-foreground: var(--foreground);
+  --muted: oklch(0.96 0.004 265);
+  --muted-foreground: oklch(0.52 0.015 265);
+  --border: oklch(0.9 0.006 265);
+  --input: oklch(0.93 0.006 265);
+  --ring: oklch(0.62 0.16 268);
+  --primary: oklch(0.53 0.19 268);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.955 0.006 265);
+  --secondary-foreground: oklch(0.28 0.02 265);
+  --accent: oklch(0.95 0.02 268);
+  --accent-foreground: oklch(0.3 0.06 268);
+  --destructive: oklch(0.58 0.21 22);
+  --destructive-foreground: oklch(0.99 0 0);
+  --surface: oklch(0.975 0.003 265);
+  --elevated: oklch(1 0 0);
+
+  /* Semantic column + priority colors, referenced by kind rather than by name. */
+  --kind-backlog: oklch(0.6 0.03 265);
+  --kind-active: oklch(0.6 0.15 250);
+  --kind-blocked: oklch(0.62 0.19 25);
+  --kind-review: oklch(0.68 0.15 75);
+  --kind-done: oklch(0.62 0.15 152);
+
+  --prio-low: oklch(0.66 0.03 265);
+  --prio-medium: oklch(0.62 0.13 250);
+  --prio-high: oklch(0.68 0.16 62);
+  --prio-urgent: oklch(0.6 0.21 22);
+
+  --radius: 0.75rem;
+}
+
+.dark {
+  --background: oklch(0.17 0.012 265);
+  --foreground: oklch(0.95 0.004 265);
+  --card: oklch(0.215 0.014 265);
+  --card-foreground: var(--foreground);
+  --muted: oklch(0.26 0.014 265);
+  --muted-foreground: oklch(0.68 0.014 265);
+  --border: oklch(0.31 0.014 265);
+  --input: oklch(0.3 0.014 265);
+  --ring: oklch(0.66 0.17 268);
+  --primary: oklch(0.68 0.17 268);
+  --primary-foreground: oklch(0.16 0.02 265);
+  --secondary: oklch(0.27 0.016 265);
+  --secondary-foreground: oklch(0.94 0.006 265);
+  --accent: oklch(0.31 0.05 268);
+  --accent-foreground: oklch(0.92 0.03 268);
+  --destructive: oklch(0.62 0.2 22);
+  --destructive-foreground: oklch(0.99 0 0);
+  --surface: oklch(0.195 0.012 265);
+  --elevated: oklch(0.245 0.016 265);
+
+  --kind-backlog: oklch(0.7 0.03 265);
+  --kind-active: oklch(0.7 0.15 250);
+  --kind-blocked: oklch(0.7 0.18 25);
+  --kind-review: oklch(0.78 0.15 78);
+  --kind-done: oklch(0.72 0.15 152);
+
+  --prio-low: oklch(0.68 0.02 265);
+  --prio-medium: oklch(0.7 0.13 250);
+  --prio-high: oklch(0.78 0.15 65);
+  --prio-urgent: oklch(0.7 0.2 22);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-surface: var(--surface);
+  --color-elevated: var(--elevated);
+
+  --color-kind-backlog: var(--kind-backlog);
+  --color-kind-active: var(--kind-active);
+  --color-kind-blocked: var(--kind-blocked);
+  --color-kind-review: var(--kind-review);
+  --color-kind-done: var(--kind-done);
+
+  --color-prio-low: var(--prio-low);
+  --color-prio-medium: var(--prio-medium);
+  --color-prio-high: var(--prio-high);
+  --color-prio-urgent: var(--prio-urgent);
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 0.25rem);
+  --radius-sm: calc(var(--radius) - 0.375rem);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+  --animate-in: enter 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-lift: lift 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes enter {
+  from { opacity: 0; transform: translateY(4px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes lift {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html {
+    color-scheme: light dark;
+  }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  /* One focus treatment everywhere, rather than each component inventing its own. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--accent);
+    color: var(--accent-foreground);
+  }
+}
+
+@layer utilities {
+  /* Thin, unobtrusive scrollbars — the board has a lot of them. */
+  .scrollbar-slim {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .scrollbar-slim::-webkit-scrollbar { width: 8px; height: 8px; }
+  .scrollbar-slim::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-slim::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  .scrollbar-slim::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); background-clip: content-box; }
+
+  .grain {
+    background-image: radial-gradient(color-mix(in oklab, var(--foreground) 4%, transparent) 1px, transparent 0);
+    background-size: 18px 18px;
+  }
+}
+
+/* Keyframes referenced by the Radix-driven components (dialog, menus, tooltips). */
+@keyframes fadeIn  { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+@keyframes dialogIn {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
+  to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@automation/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "migrate": "bun -e 'import(\"@automation/core\").then(m => m.getDb())'",
+    "seed": "bun src/seed.ts"
+  },
+  "dependencies": {
+    "@automation/core": "workspace:*",
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21"
+  }
+}
