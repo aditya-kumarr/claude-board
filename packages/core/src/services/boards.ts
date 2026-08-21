@@ -234,8 +234,21 @@ export function updateBoard(boardId: string, input: UpdateBoardInput, actor: Act
 
   let newEndsAt = existing.endsAt;
   if (durationChanged) {
-    const kind = input.durationKind ?? existing.durationKind;
+    // An explicit endsAt only means something for a custom window — every other
+    // kind derives its end from the calendar period. Rather than accept the
+    // field and silently ignore it, treat it as a switch to custom.
+    const requestedKind = input.durationKind ?? existing.durationKind;
+    const kind =
+      input.endsAt !== undefined && requestedKind !== "custom" && input.durationKind === undefined
+        ? "custom"
+        : requestedKind;
     if (!isDurationKind(kind)) throw badRequest("durationKind is not a valid duration", { received: kind });
+    if (input.endsAt !== undefined && input.durationKind !== undefined && input.durationKind !== "custom") {
+      throw badRequest(
+        `endsAt only applies to a custom duration; a ${input.durationKind} board's end is derived from the calendar period`,
+        { durationKind: input.durationKind, endsAt: input.endsAt },
+      );
+    }
     const window = resolveWindow({
       durationKind: kind,
       anchor: input.anchor ?? (kind === existing.durationKind ? existing.startsAt : undefined),
