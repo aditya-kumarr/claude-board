@@ -4,6 +4,7 @@ import {
   type ActivityEntry,
   type BoardColumn,
   type BoardDetail,
+  type MentionWithContext,
   type Task,
   type TaskComment,
   type TaskWithContext,
@@ -26,13 +27,17 @@ export function shortDate(iso: string | null): string {
 export const who = (id: string | null): string =>
   id === null ? "unassigned" : id === "claude" ? "Claude" : id === "me" ? "Me" : id;
 
-function taskLine(task: Task | TaskWithContext, options: { showBoard?: boolean } = {}): string {
+function taskLine(
+  task: Task | TaskWithContext,
+  options: { showBoard?: boolean; openMentions?: number } = {},
+): string {
   const overdue = "overdue" in task ? task.overdue : false;
   const parts = [
     `  ${PRIORITY_MARK[task.priority] ?? "  "}${task.id}  ${task.title}`,
     `assignee=${who(task.assigneeId)}`,
     `due=${shortDate(task.dueAt)}${overdue ? " OVERDUE" : ""}`,
   ];
+  if (options.openMentions) parts.push(`@claude=${options.openMentions} WAITING`);
   if (options.showBoard && "boardName" in task) parts.push(`board=${task.boardName}`);
   if (options.showBoard && "columnName" in task) parts.push(`state=${task.columnName}`);
   if (task.blockedReason) parts.push(`blocked=${task.blockedReason}`);
@@ -41,6 +46,10 @@ function taskLine(task: Task | TaskWithContext, options: { showBoard?: boolean }
 
 export function renderBoard(detail: BoardDetail, options: { includeDone?: boolean } = {}): string {
   const { board, window, columns, tasks, stats } = detail;
+  // Per-card counts, so the board view says *which* cards are waiting on a reply
+  // and not just how many are.
+  const waiting = new Map<string, number>();
+  for (const mention of detail.openMentions) waiting.set(mention.taskId, (waiting.get(mention.taskId) ?? 0) + 1);
   const deadline = window.expired
     ? `EXPIRED ${humanizeDuration(window.remainingMs)} ago`
     : `${humanizeDuration(window.remainingMs)} left`;
@@ -51,6 +60,10 @@ export function renderBoard(detail: BoardDetail, options: { includeDone?: boolea
     board.description ? `note: ${board.description}` : null,
     `tasks=${stats.total}  done=${stats.done}  active=${stats.active}  blocked=${stats.blocked}  review=${stats.review}  overdue=${stats.overdue}`,
     `assigned: Claude=${stats.assignedToClaude}  Me=${stats.assignedToMe}  unassigned=${stats.unassigned}`,
+    // Loud, because an unanswered @claude is the user waiting on a reply.
+    stats.openMentions > 0
+      ? `>> ${stats.openMentions} unanswered @claude request(s) in this board's comments — call mentions to read them.`
+      : null,
     "",
   ].filter((line): line is string => line !== null);
 
@@ -63,7 +76,7 @@ export function renderBoard(detail: BoardDetail, options: { includeDone?: boolea
       `${column.name} [${column.key}] (${column.kind})  ${inColumn.length}${column.wipLimit ? `/${column.wipLimit}` : ""}`,
     );
     if (inColumn.length === 0) lines.push("  (empty)");
-    for (const task of shown) lines.push(taskLine(task));
+    for (const task of shown) lines.push(taskLine(task, { openMentions: waiting.get(task.id) }));
     if (hidden) lines.push(`  ... ${hidden} more done task(s); pass includeDone to list them`);
     lines.push("");
   }
@@ -77,7 +90,8 @@ export function renderBoardSummary(detail: BoardDetail): string {
   return (
     `${board.id}  ${board.name}  [${board.durationKind}: ${window.label}]  ${state}\n` +
     `    tasks=${stats.total} done=${stats.done} blocked=${stats.blocked} overdue=${stats.overdue}` +
-    `  mine(Claude)=${stats.assignedToClaude}`
+    `  mine(Claude)=${stats.assignedToClaude}` +
+    (stats.openMentions > 0 ? `  @claude=${stats.openMentions} UNANSWERED` : "")
   );
 }
 
@@ -100,8 +114,10 @@ export function renderTaskDetail(input: {
   board: { id: string; name: string; endsAt: string; durationKind: string };
   column: BoardColumn;
   overdue: boolean;
+  openMentions?: MentionWithContext[];
 }): string {
   const { task, board, column, overdue } = input;
+  const open = input.openMentions ?? [];
   return [
     `${task.title}  (${task.id})`,
     `board=${board.name} (${board.id})  boardDeadline=${shortDate(board.endsAt)} [${board.durationKind}]`,
@@ -109,6 +125,11 @@ export function renderTaskDetail(input: {
     `assignee=${who(task.assigneeId)}  createdBy=${who(task.createdBy)}`,
     `due=${shortDate(task.dueAt)}${overdue ? "  OVERDUE" : ""}  completed=${task.completedAt ? shortDate(task.completedAt) : "no"}`,
     task.blockedReason ? `blockedReason=${task.blockedReason}` : null,
+    // Before the description, because an open request changes what to do with
+    // everything below it.
+    open.length > 0
+      ? `\nOPEN @claude REQUEST(S) ON THIS CARD:\n${open.map(mentionRequestLine).join("\n")}`
+      : null,
     "",
     task.description ? `description:\n${task.description}` : "description: (none)",
     "",
@@ -117,6 +138,40 @@ export function renderTaskDetail(input: {
   ]
     .filter((line): line is string => line !== null)
     .join("\n");
+}
+
+const mentionRequestLine = (mention: MentionWithContext): string =>
+  `  ${mention.id}  [${mention.status}]  ${mention.requestedByName} asked ${shortDate(mention.createdAt)}: ${mention.request}`;
+
+/**
+ * One request, rendered as a block rather than a line: this is the payload the
+ * model acts on, so the ask, the card it hangs off and the board deadline all
+ * have to be readable without a second tool call.
+ */
+export function renderMention(mention: MentionWithContext): string {
+  return [
+    `${mention.id}  [${mention.status}]  asked by ${mention.requestedByName} ${shortDate(mention.createdAt)} via ${mention.source}`,
+    `  request: ${mention.request}`,
+    mention.request !== mention.body.trim() ? `  full comment: ${mention.body}` : null,
+    `  on task: ${mention.taskId}  "${mention.taskTitle}"`,
+    `  state=${mention.columnName} [${mention.columnKey}] (${mention.columnKind})  priority=${mention.taskPriority}` +
+      `  assignee=${who(mention.taskAssigneeId)}`,
+    `  due=${shortDate(mention.taskDueAt)}${mention.taskOverdue ? " OVERDUE" : ""}` +
+      `  board="${mention.boardName}" (${mention.boardId}) closes ${shortDate(mention.boardEndsAt)}`,
+    mention.taskDescription ? `  task description: ${mention.taskDescription.replace(/\s+/g, " ").slice(0, 400)}` : null,
+    mention.claimedAt ? `  claimed ${shortDate(mention.claimedAt)}` : null,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+}
+
+export function renderMentions(mentions: MentionWithContext[], heading: string): string {
+  if (mentions.length === 0) return `${heading}\n  (nothing waiting)`;
+  return [
+    `${heading}  --  ${mentions.length} request(s), oldest first`,
+    "",
+    mentions.map(renderMention).join("\n\n"),
+  ].join("\n");
 }
 
 export function renderActivity(entries: ActivityEntry[]): string {

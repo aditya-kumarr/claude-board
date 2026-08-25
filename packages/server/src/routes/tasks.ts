@@ -1,11 +1,13 @@
 import { Router } from "express";
 import {
-  addComment,
+  addCommentWithMentions,
   deleteTask,
   getTaskDetail,
   listActivity,
   listComments,
+  listMentions,
   listTasks,
+  MENTION_STATUSES,
   moveTask,
   updateTask,
 } from "@automation/core";
@@ -71,10 +73,38 @@ tasksRouter.get(
   }),
 );
 
+/**
+ * Returns the mentions the comment raised alongside it, so the UI can tell the
+ * user their `@claude` was actually registered as a request rather than leaving
+ * them to guess from a highlighted word.
+ */
 tasksRouter.post(
   "/:taskId/comments",
   route((req, res) => {
-    res.status(201).json(addComment(param(req, "taskId"), String(req.body?.body ?? ""), actorFrom(req)));
+    const { comment, mentions } = addCommentWithMentions(
+      param(req, "taskId"),
+      String(req.body?.body ?? ""),
+      actorFrom(req),
+    );
+    res.status(201).json({ ...comment, mentions });
+  }),
+);
+
+/**
+ * The whole mention history for one card, not just the open ones — the thread
+ * view renders a status against each `@claude` the user ever wrote, including
+ * the answered ones.
+ */
+tasksRouter.get(
+  "/:taskId/mentions",
+  route((req, res) => {
+    res.json({
+      mentions: listMentions({
+        taskId: param(req, "taskId"),
+        status: typeof req.query.status === "string" ? (req.query.status as never) : MENTION_STATUSES,
+        includeArchivedBoards: true,
+      }),
+    });
   }),
 );
 

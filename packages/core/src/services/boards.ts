@@ -10,6 +10,7 @@ import type { Board, BoardDetail, BoardStats, DurationKind } from "../types.ts";
 import { USER_CLAUDE, USER_ME } from "../types.ts";
 import { record } from "./activity.ts";
 import type { ActorContext } from "./context.ts";
+import { listMentions } from "./mentions.ts";
 
 const log = createLogger("boards");
 
@@ -130,6 +131,12 @@ export function listBoards(options: ListBoardsOptions = {}): BoardDetail[] {
 
 export function computeStats(boardId: string): BoardStats {
   const db = getDb();
+  const openMentions =
+    db
+      .query<{ count: number }, [string]>(
+        "SELECT COUNT(*) AS count FROM task_mentions WHERE board_id = ? AND status IN ('pending','claimed')",
+      )
+      .get(boardId)?.count ?? 0;
   const rows = db
     .query<{ kind: string; assignee_id: string | null; due_at: string | null; completed_at: string | null }, [string]>(
       `SELECT c.kind AS kind, t.assignee_id, t.due_at, t.completed_at
@@ -150,6 +157,7 @@ export function computeStats(boardId: string): BoardStats {
     assignedToMe: 0,
     assignedToClaude: 0,
     unassigned: 0,
+    openMentions,
   };
 
   for (const row of rows) {
@@ -195,6 +203,7 @@ export function getBoardDetail(boardId: string): BoardDetail {
     columns,
     tasks,
     stats: computeStats(boardId),
+    openMentions: listMentions({ boardId, includeArchivedBoards: true, limit: 200 }),
   };
 }
 

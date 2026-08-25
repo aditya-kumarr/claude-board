@@ -11,6 +11,9 @@ import { metaRouter } from "./routes/meta.ts";
 
 const log = createLogger("server");
 const PORT = Number(process.env.PORT ?? 4000);
+// Loopback by default. `cloudflared` runs on this machine so it never needs more than that;
+// set HOST=0.0.0.0 only to reach the board directly over the LAN without the tunnel.
+const HOST = process.env.HOST ?? "127.0.0.1";
 
 export function createApp(): express.Express {
   const app = express();
@@ -41,9 +44,10 @@ export function createApp(): express.Express {
 if (import.meta.main) {
   getDb(); // run migrations before accepting traffic
   const app = createApp();
-  const server = app.listen(PORT, "127.0.0.1", () => {
+  const server = app.listen(PORT, HOST, () => {
     log.info("api listening", {
-      url: `http://127.0.0.1:${PORT}`,
+      url: `http://${HOST === "0.0.0.0" ? "127.0.0.1" : HOST}:${PORT}`,
+      host: HOST,
       database: DB_PATH,
       logFile: currentLogFile(),
       pid: process.pid,

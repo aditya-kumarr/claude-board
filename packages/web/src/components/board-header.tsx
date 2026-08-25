@@ -1,4 +1,4 @@
-import { AlertTriangle, Archive, CalendarRange, MoreHorizontal, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Archive, AtSign, CalendarRange, MoreHorizontal, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress, Separator } from "@/components/ui/misc";
@@ -109,6 +109,15 @@ export function BoardHeader({
           {stats.blocked > 0 ? <Stat label="blocked" value={stats.blocked} tint={kindColor("blocked")} /> : null}
           {stats.review > 0 ? <Stat label="in review" value={stats.review} tint={kindColor("review")} /> : null}
           {stats.overdue > 0 ? <Stat label="overdue" value={stats.overdue} tint="var(--destructive)" /> : null}
+          {/* Sits with the counts rather than the assignee badges: it is work
+              waiting on Claude regardless of who the cards are assigned to. */}
+          {stats.openMentions > 0 ? (
+            <Hint label={`${stats.openMentions} @claude request(s) on this board still unanswered`}>
+              <Badge tint="var(--primary)" className="gap-1">
+                <AtSign /> {stats.openMentions} asked
+              </Badge>
+            </Hint>
+          ) : null}
           <Badge tint="var(--primary)" className="gap-1">
             Claude {stats.assignedToClaude}
           </Badge>

@@ -20,6 +20,8 @@ export interface ColumnProps {
   tasks: Task[];
   users: User[];
   now: number;
+  /** Open `@claude` requests per task id, for the card badge. */
+  mentionCounts: Map<string, number>;
   draggingTaskId: string | null;
   /** Index the dragged card would land at, or null when this column is not the drop target. */
   dropIndex: number | null;
@@ -44,6 +46,7 @@ export function BoardColumnView({
   tasks,
   users,
   now,
+  mentionCounts,
   draggingTaskId,
   dropIndex,
   onTaskDragStart,
@@ -154,6 +157,7 @@ export function BoardColumnView({
               columnKind={column.kind as ColumnKind}
               users={users}
               now={now}
+              openMentions={mentionCounts.get(task.id) ?? 0}
               dragging={draggingTaskId === task.id}
               onOpen={() => onOpenTask(task.id)}
               onDragStart={(event) => {

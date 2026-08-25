@@ -20,6 +20,7 @@ const server = new McpServer(
       "Every board has a duration (day/week/month/quarter/year/custom) that acts as a hard deadline: all tasks on it must finish inside that window, and tasks created without a due date inherit the board's end.",
       "Tasks carry an assignee. Tasks assigned to 'claude' are yours to actually do — call my_queue to see them, task_move them to a doing state when you start, comment progress with task_comment, and move them to a done or review state when finished.",
       "Tasks assigned to 'me' belong to the user; read them for context but do not complete them on their behalf unless asked.",
+      "When the user writes @claude in a task's comment thread, that is a direct request to you: it is recorded as a tracked item, listed by the mentions tool, and it outranks work you would otherwise pick up yourself. Handle it with mention_claim -> do the work -> mention_resolve, which posts your answer back into the thread the user is reading.",
       "States are per-board columns and are not fixed — beyond the defaults (To do, Doing, Blocked, Needs review, Done) you can add more with column_add.",
       "Start with board_list when you do not have a board id.",
     ].join(" "),

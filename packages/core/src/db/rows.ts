@@ -4,6 +4,8 @@ import type {
   BoardColumn,
   ColumnKind,
   DurationKind,
+  Mention,
+  MentionStatus,
   Priority,
   Task,
   TaskComment,
@@ -60,6 +62,20 @@ export interface CommentRow {
   task_id: string;
   author_id: string;
   body: string;
+  created_at: string;
+}
+export interface MentionRow {
+  id: string;
+  task_id: string;
+  board_id: string;
+  comment_id: string;
+  target_id: string;
+  requested_by: string;
+  status: string;
+  source: string;
+  claimed_at: string | null;
+  resolved_at: string | null;
+  resolution: string | null;
   created_at: string;
 }
 export interface ActivityRow {
@@ -125,6 +141,21 @@ export const toComment = (row: CommentRow): TaskComment => ({
   taskId: row.task_id,
   authorId: row.author_id,
   body: row.body,
+  createdAt: row.created_at,
+});
+
+export const toMention = (row: MentionRow): Mention => ({
+  id: row.id,
+  taskId: row.task_id,
+  boardId: row.board_id,
+  commentId: row.comment_id,
+  targetId: row.target_id,
+  requestedBy: row.requested_by,
+  status: row.status as MentionStatus,
+  source: row.source as ActorSource,
+  claimedAt: row.claimed_at,
+  resolvedAt: row.resolved_at,
+  resolution: row.resolution,
   createdAt: row.created_at,
 });
 

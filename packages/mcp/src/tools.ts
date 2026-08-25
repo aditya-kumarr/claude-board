@@ -14,12 +14,17 @@ import {
   DURATION_KINDS,
   getBoardDetail,
   getTaskDetail,
+  claimMention,
   listActivity,
   listBoards,
   listColumns,
+  listMentions,
   listTasks,
+  MENTION_STATUSES,
   moveTask,
   PRIORITIES,
+  releaseMention,
+  resolveMention,
   updateBoard,
   updateColumn,
   updateTask,
@@ -31,6 +36,8 @@ import {
   renderBoard,
   renderBoardSummary,
   renderColumns,
+  renderMention,
+  renderMentions,
   renderTaskDetail,
   renderTaskList,
 } from "./format.ts";
@@ -378,9 +385,27 @@ export function registerTools(server: McpServer): void {
       const overdue = tasks.filter((task) => task.overdue).length;
       const heading = `Assigned to Claude${overdue ? ` (${overdue} OVERDUE)` : ""}`;
       const body = renderTaskList(tasks, heading);
-      return tasks.length === 0
-        ? `${body}\n\nNothing is assigned to you right now.`
-        : `${body}\n\nNext step: task_get for detail, then task_move to "doing" when you start and "done" (or "needs review") when finished.`;
+
+      // An unanswered @claude outranks the queue: the human is waiting on a reply,
+      // and it is the one thing here with a person on the other end of it.
+      const pending = listMentions({ boardId: args.boardId, status: "pending" });
+      const banner =
+        pending.length > 0
+          ? `${renderMentions(pending, "UNANSWERED @claude REQUESTS — handle these first")}\n\n` +
+            `Take one with mention_claim, do it, then mention_resolve.\n\n`
+          : "";
+
+      if (tasks.length === 0) {
+        return `${banner}${body}\n\n${
+          pending.length > 0
+            ? "No tasks are assigned to you, but the requests above are still waiting."
+            : "Nothing is assigned to you right now."
+        }`;
+      }
+      return (
+        `${banner}${body}\n\n` +
+        `Next step: task_get for detail, then task_move to "doing" when you start and "done" (or "needs review") when finished.`
+      );
     }),
   );
 
@@ -432,7 +457,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Comment on a task",
       description:
-        "Append a comment as Claude. This is the channel for reporting progress, findings, questions or hand-offs on work assigned to you — the human sees it on the card in the web UI.",
+        "Append a comment as Claude. This is the channel for reporting progress, findings, questions or hand-offs on work assigned to you — the human sees it on the card in the web UI. Note that when the *human* writes @claude in a comment it becomes a tracked request you are expected to act on (see the mentions tool); your own comments never create one.",
       inputSchema: {
         taskId: z.string(),
         body: z.string().describe("Comment text, up to 4000 characters."),
@@ -441,6 +466,122 @@ export function registerTools(server: McpServer): void {
     handler("task_comment", (args: { taskId: string; body: string }, ctx) => {
       addComment(args.taskId, args.body, ctx);
       return `Comment added to ${args.taskId}.\n\n${renderTaskDetail(getTaskDetail(args.taskId))}`;
+    }),
+  );
+
+  /* ---------------------------------------------------------------- mentions */
+
+  server.registerTool(
+    "mentions",
+    {
+      title: "Requests addressed to me",
+      description:
+        "Your inbox. When the human writes @claude in a task's comment thread it becomes a tracked request, and this lists the ones still open — oldest first, each with the ask itself plus the card, its state, its due date and the board deadline, so one call is enough to act. These are direct asks from a person and take precedence over picking up queue work on your own initiative. Read here first whenever you are catching up.",
+      inputSchema: {
+        boardId: z.string().optional().describe("Restrict to one board."),
+        status: z
+          .enum(MENTION_STATUSES)
+          .optional()
+          .describe(
+            "Default is the open ones (pending + claimed). 'answered' or 'dismissed' to review what you already handled.",
+          ),
+        taskId: z.string().optional().describe("Only requests on this card."),
+        since: z.string().optional().describe("ISO timestamp; only requests made after it."),
+        limit: z.number().int().min(1).max(500).optional().describe("Default 50."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    handler(
+      "mentions",
+      (args: { boardId?: string; status?: (typeof MENTION_STATUSES)[number]; taskId?: string; since?: string; limit?: number }) => {
+        const mentions = listMentions(args);
+        const heading = args.status ? `@claude requests [${args.status}]` : "Open @claude requests";
+        const body = renderMentions(mentions, heading);
+        if (mentions.length === 0) return `${body}\n\nNothing is waiting on you. my_queue has the work assigned to you.`;
+        return (
+          `${body}\n\n` +
+          `Next step: mention_claim <mentionId> to take one (it returns the card and the whole thread), ` +
+          `do what was asked with the task_* tools, then mention_resolve with a one-line summary of what you did.`
+        );
+      },
+    ),
+  );
+
+  server.registerTool(
+    "mention_claim",
+    {
+      title: "Take a request",
+      description:
+        "Claim one open request so a second run of you does not duplicate the work, and get everything needed to carry it out: the ask, the full card and its comment thread. Claiming an already-claimed or already-resolved request fails rather than stealing it. Claim before acting, resolve when done.",
+      inputSchema: {
+        mentionId: z.string().describe("Request id from the mentions tool, e.g. men_a1b2c3d4."),
+      },
+    },
+    handler("mention_claim", (args: { mentionId: string }, ctx) => {
+      const mention = claimMention(args.mentionId, ctx);
+      return [
+        `Claimed ${mention.id}.`,
+        "",
+        renderMention(mention),
+        "",
+        "--- the card in full ---",
+        "",
+        renderTaskDetail(getTaskDetail(mention.taskId)),
+        "",
+        `Do what was asked, then call mention_resolve for ${mention.id}. If you cannot, resolve it as dismissed and say why — leaving it claimed reads to the human as ignored.`,
+      ].join("\n");
+    }),
+  );
+
+  server.registerTool(
+    "mention_resolve",
+    {
+      title: "Close out a request",
+      description:
+        "Close a request you have finished. `resolution` is the one-line record of what you actually did. By default that same text is posted into the task's comment thread as your reply, because a request answered with silence in the thread is indistinguishable from one that was ignored — pass an explicit `reply` for a longer answer, or reply=null to resolve without commenting. Use status=dismissed when the right outcome was to not act, and say why.",
+      inputSchema: {
+        mentionId: z.string(),
+        resolution: z
+          .string()
+          .describe("What you did about it, one line, up to 1000 characters. Recorded in the audit trail."),
+        status: z
+          .enum(["answered", "dismissed"])
+          .optional()
+          .describe("Default answered. Use dismissed when you deliberately did not act, with the reason in resolution."),
+        reply: z
+          .string()
+          .nullable()
+          .optional()
+          .describe("Comment posted back into the thread. Defaults to the resolution text; null posts nothing."),
+      },
+    },
+    handler(
+      "mention_resolve",
+      (
+        args: { mentionId: string; resolution: string; status?: "answered" | "dismissed"; reply?: string | null },
+        ctx,
+      ) => {
+        const { mentionId, ...input } = args;
+        const mention = resolveMention(mentionId, input, ctx);
+        return `Request ${mention.id} marked ${mention.status}.\n\n${renderTaskDetail(getTaskDetail(mention.taskId))}`;
+      },
+    ),
+  );
+
+  server.registerTool(
+    "mention_release",
+    {
+      title: "Put a request back",
+      description:
+        "Return a request you claimed to the pending queue, for when you cannot finish it now and want it picked up later rather than resolved. Prefer mention_resolve with status=dismissed when the answer is that it should not be done at all.",
+      inputSchema: {
+        mentionId: z.string(),
+        reason: z.string().describe("Why you are handing it back."),
+      },
+    },
+    handler("mention_release", (args: { mentionId: string; reason: string }, ctx) => {
+      const mention = releaseMention(args.mentionId, args.reason, ctx);
+      return `Request ${mention.id} is pending again.\n\n${renderMention(mention)}`;
     }),
   );
 

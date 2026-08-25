@@ -11,6 +11,10 @@ bun run dev:server      # Express API only (bun --watch)
 bun run dev:web         # Vite only; proxies /api to :4000
 bun run typecheck       # tsc --noEmit over core, server, mcp, web
 bun run build           # build the UI into packages/web/dist
+bun run serve           # build + API serving the SPA on one port (:4000)
+bun run tunnel          # publish :4000 on the Cloudflare hostname from TUNNEL_HOSTNAME
+bun run watch:mentions  # spawn `claude -p` for each new @claude left in a comment
+                        # --once / --dry-run / --backlog
 bun run db:reset        # drop data/board.db and re-migrate
 bun run db:seed         # sample board; no-ops if it already exists
 bun run mcp             # MCP server on stdio (Claude normally spawns this)
@@ -44,10 +48,23 @@ go through `write()` or the UI will not notice it.
   own; `kind` (`backlog`/`active`/`blocked`/`review`/`done`) is what stats and completion read.
   `inferColumnKind()` guesses a kind from a new column's name. Entering a `done`-kind column
   stamps `completed_at`; leaving one clears it.
+- **`@claude` in a comment is a request, not text.** `addCommentWithMentions()` parses the body
+  in the one write path both transports share and inserts a `task_mentions` row per agent named,
+  so the ask survives whether or not anyone is in a session. Two rules stop the loop feeding
+  itself: only agent-kind users get a row, and an actor never enqueues a mention of *itself*, so
+  Claude writing "@claude will follow up" is a note. `UNIQUE (comment_id, target_id)` makes the
+  parse idempotent. Lifecycle is `pending → claimed → answered|dismissed`, and resolving posts
+  the resolution back into the thread by default — a request answered with silence in the thread
+  is indistinguishable from one that was ignored.
 - **Deleting a column moves its tasks**, never deletes them, and a board must keep ≥1 column.
 - **Positions are fractional** (`services/positions.ts`), so a reorder writes one row.
 - Every mutation appends to `activity` inside the caller's transaction, recording `actor_id`
   and `source` (`web` | `mcp` | `system`).
+
+`services/comments.ts` is a deliberate leaf: it owns comment persistence and imports neither
+`tasks` nor `mentions`, which is what lets `addComment` (parses mentions out of what the human
+wrote) and `resolveMention` (writes Claude's reply back) both append to a thread without the two
+services importing each other.
 
 ### Assignees
 
@@ -80,8 +97,37 @@ layout dense enough that one call is usually enough to act on. Descriptions carr
 model needs at selection time (that due dates are bounded by the board, that `my_queue` is the
 entry point), because a tool description is the only documentation the model gets.
 
+The mention inbox is surfaced in three places on purpose, because a queue the model has to
+remember to check is a queue it will not check: `mentions`/`mention_claim`/`mention_resolve` are
+the explicit tools, `my_queue` leads with a banner of anything pending, and `board_get` /
+`board_list` / `task_get` mark which cards are waiting. `mention_claim` returns the card and the
+whole thread so one call is enough to act.
+
+### The mention watcher
+
+`scripts/watch-mentions.ts` (`bun run watch:mentions`) is the push half: it polls for pending
+mentions and spawns a real `claude -p` run per request. It lives in `scripts/`, outside the bun
+workspace, so it imports core by **relative path** (`../packages/core/src/index.ts`) and is not
+covered by `bun run typecheck` — same as `scripts/tunnel.ts`.
+
+Three things about it are load-bearing rather than incidental:
+
+- It writes its own `data/mention-watch.mcp.json` holding **only** the board server and passes
+  `--strict-mcp-config`, so an unattended run triggered by a web form cannot reach the repo's
+  other MCP servers. `AUTOMATION_DB_PATH` is pinned into that config, not inherited, or the
+  spawned server would answer requests against a different database.
+- It does **not** claim the mention itself — the spawned run does. That keeps the audit trail
+  honest (`claimed by claude via mcp`) and makes a second watcher lose the claim rather than the
+  work. An in-process in-flight set stops the same watcher double-spawning.
+- A run that exits without resolving is a failure even on exit code 0. The watcher re-reads the
+  status, releases the mention for another attempt, and after `MENTION_WATCH_MAX_ATTEMPTS`
+  dismisses it with the run's last output posted to the card. Silence is the one outcome the
+  human cannot act on.
+
 `packages/web/src/lib/types.ts` deliberately duplicates the core wire types so the web build
-stays standalone; keep the two in sync when changing an API shape.
+stays standalone; keep the two in sync when changing an API shape. `components/mention-text.tsx`
+carries a copy of core's mention regex for highlighting — the two must agree, or the UI paints a
+mention the parser then ignores.
 
 ## Frontend notes
 

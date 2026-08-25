@@ -8,3 +8,5 @@ logs/*.jsonl
 .DS_Store
 *.local
 .env
+cloudflared/config.generated.yml
+data/mention-watch.mcp.json

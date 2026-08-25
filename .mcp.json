@@ -2,10 +2,22 @@
   "mcpServers": {
     "board": {
       "command": "bun",
-      "args": ["run", "packages/mcp/src/index.ts"],
+      "args": [
+        "run",
+        "packages/mcp/src/index.ts"
+      ],
       "env": {
         "LOG_LEVEL": "info"
       }
+    },
+    "ms365": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@softeria/ms-365-mcp-server",
+        "--org-mode"
+      ],
+      "env": {}
     }
   }
 }

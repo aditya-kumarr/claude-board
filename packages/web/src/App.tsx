@@ -58,6 +58,19 @@ export default function App() {
     [boards, view],
   );
 
+  /**
+   * Open `@claude` requests per card. Derived once here rather than fetched per
+   * card: the board payload already carries them, and a badge that needs its own
+   * request per card is a badge that will not be there.
+   */
+  const mentionCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const mention of activeBoard?.openMentions ?? []) {
+      counts.set(mention.taskId, (counts.get(mention.taskId) ?? 0) + 1);
+    }
+    return counts;
+  }, [activeBoard?.openMentions]);
+
   const fail = useCallback((message: string) => toast.error(message), []);
 
   const drop = useCallback(
@@ -204,6 +217,7 @@ export default function App() {
                       .sort((a, b) => a.position - b.position)}
                     users={users}
                     now={now}
+                    mentionCounts={mentionCounts}
                     draggingTaskId={draggingTaskId}
                     dropIndex={dropTarget?.columnId === column.id ? dropTarget.index : null}
                     onTaskDragStart={setDraggingTaskId}

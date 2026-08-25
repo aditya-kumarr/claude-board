@@ -1,4 +1,4 @@
-import { AlertTriangle, Ban, CalendarClock, Check, MessageSquare } from "lucide-react";
+import { AlertTriangle, AtSign, Ban, CalendarClock, Check, MessageSquare } from "lucide-react";
 import { Avatar } from "@/components/ui/misc";
 import { Hint } from "@/components/ui/tooltip";
 import { formatDue } from "@/lib/format";
@@ -12,6 +12,8 @@ export interface TaskCardProps {
   columnKind: ColumnKind;
   users: User[];
   now: number;
+  /** Unresolved `@claude` requests in this card's thread. */
+  openMentions?: number;
   dragging: boolean;
   onOpen: () => void;
   onDragStart: (event: React.DragEvent) => void;
@@ -23,7 +25,17 @@ export interface TaskCardProps {
  * owner, deadline, and whether it is stuck — without needing to be opened. The
  * left rail is priority-coloured so a column scans by urgency at a glance.
  */
-export function TaskCard({ task, columnKind, users, now, dragging, onOpen, onDragStart, onDragEnd }: TaskCardProps) {
+export function TaskCard({
+  task,
+  columnKind,
+  users,
+  now,
+  openMentions = 0,
+  dragging,
+  onOpen,
+  onDragStart,
+  onDragEnd,
+}: TaskCardProps) {
   const assignee = users.find((user) => user.id === task.assigneeId);
   const overdue = columnKind !== "done" && task.dueAt !== null && new Date(task.dueAt).getTime() < now;
   const dueSoon =
@@ -90,6 +102,24 @@ export function TaskCard({ task, columnKind, users, now, dragging, onOpen, onDra
         >
           {task.priority}
         </span>
+
+        {/* An unanswered ask outranks the rest of this row: somebody is waiting. */}
+        {openMentions > 0 ? (
+          <Hint label={`${openMentions} @claude request${openMentions > 1 ? "s" : ""} waiting for a reply`}>
+            <span
+              className="inline-flex items-center gap-1 rounded-full px-1.5 py-px font-medium ring-1 ring-inset"
+              style={{
+                color: "var(--primary)",
+                backgroundColor: "color-mix(in oklab, var(--primary) 12%, transparent)",
+                // @ts-expect-error CSS custom property for the ring color
+                "--tw-ring-color": "color-mix(in oklab, var(--primary) 30%, transparent)",
+              }}
+            >
+              <AtSign className="size-2.5" />
+              {openMentions > 1 ? `${openMentions} asks` : "asked"}
+            </span>
+          </Hint>
+        ) : null}
 
         {task.dueAt ? (
           <span

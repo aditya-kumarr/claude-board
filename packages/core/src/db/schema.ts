@@ -100,6 +100,35 @@ export const MIGRATIONS: Migration[] = [
       INSERT INTO meta (key, value) VALUES ('revision', '0');
     `,
   },
+  {
+    version: 2,
+    name: "task_mentions",
+    sql: /* sql */ `
+      -- An @claude in a comment is a *request*, not decoration: it gets its own
+      -- row with a lifecycle so nothing the human asked for is silently dropped.
+      -- The request text is not copied here; it is the comment this points at.
+      CREATE TABLE task_mentions (
+        id           TEXT PRIMARY KEY,
+        task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        board_id     TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        comment_id   TEXT NOT NULL REFERENCES task_comments(id) ON DELETE CASCADE,
+        target_id    TEXT NOT NULL REFERENCES users(id),
+        requested_by TEXT NOT NULL REFERENCES users(id),
+        status       TEXT NOT NULL CHECK (status IN ('pending','claimed','answered','dismissed')),
+        source       TEXT NOT NULL CHECK (source IN ('web','mcp','system')),
+        claimed_at   TEXT,
+        resolved_at  TEXT,
+        resolution   TEXT,
+        created_at   TEXT NOT NULL,
+        -- One request per comment per target, so re-parsing a comment or writing
+        -- "@claude ... @claude" cannot enqueue the same ask twice.
+        UNIQUE (comment_id, target_id)
+      );
+
+      CREATE INDEX idx_mentions_open ON task_mentions (target_id, status, created_at);
+      CREATE INDEX idx_mentions_task ON task_mentions (task_id, created_at);
+    `,
+  },
 ];
 
 /** Assignees exist before any board does, so both transports can reference them. */

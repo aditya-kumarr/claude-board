@@ -67,6 +67,41 @@ export interface TaskComment {
   createdAt: string;
 }
 
+export type MentionStatus = "pending" | "claimed" | "answered" | "dismissed";
+
+/** An `@claude` in a comment, promoted to a request Claude is expected to act on. */
+export interface Mention {
+  id: string;
+  taskId: string;
+  boardId: string;
+  commentId: string;
+  targetId: string;
+  requestedBy: string;
+  status: MentionStatus;
+  source: "web" | "mcp" | "system";
+  claimedAt: string | null;
+  resolvedAt: string | null;
+  resolution: string | null;
+  createdAt: string;
+}
+
+export interface MentionWithContext extends Mention {
+  body: string;
+  request: string;
+  requestedByName: string;
+  taskTitle: string;
+  taskDescription: string | null;
+  taskAssigneeId: string | null;
+  taskPriority: Priority;
+  taskDueAt: string | null;
+  taskOverdue: boolean;
+  boardName: string;
+  boardEndsAt: string;
+  columnKey: string;
+  columnName: string;
+  columnKind: ColumnKind;
+}
+
 export interface ActivityEntry {
   id: number;
   boardId: string | null;
@@ -89,6 +124,7 @@ export interface BoardStats {
   assignedToMe: number;
   assignedToClaude: number;
   unassigned: number;
+  openMentions: number;
 }
 
 export interface BoardWindow {
@@ -108,6 +144,7 @@ export interface BoardDetail {
   columns: BoardColumn[];
   tasks: Task[];
   stats: BoardStats;
+  openMentions: MentionWithContext[];
 }
 
 export interface TaskDetail {
@@ -116,6 +153,7 @@ export interface TaskDetail {
   column: BoardColumn;
   window: BoardWindow;
   comments: TaskComment[];
+  openMentions: MentionWithContext[];
   overdue: boolean;
 }
 
@@ -141,6 +179,13 @@ export const PRIORITY_LABELS: Record<Priority, string> = {
   medium: "Medium",
   high: "High",
   urgent: "Urgent",
+};
+
+export const MENTION_STATUS_LABELS: Record<MentionStatus, string> = {
+  pending: "Waiting for Claude",
+  claimed: "Claude is on it",
+  answered: "Answered",
+  dismissed: "Not actioned",
 };
 
 export const kindColor = (kind: ColumnKind): string => `var(--kind-${kind})`;

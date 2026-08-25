@@ -1,15 +1,17 @@
 import type { SQLQueryBindings } from "bun:sqlite";
 import { getDb, write } from "../db/index.ts";
-import { toComment, toTask, type CommentRow, type TaskRow } from "../db/rows.ts";
+import { toTask, type TaskRow } from "../db/rows.ts";
 import { buildWindow, parseDate } from "../lib/duration.ts";
 import { badRequest, conflict, notFound } from "../lib/errors.ts";
 import { newId } from "../lib/ids.ts";
 import { createLogger } from "../lib/logger.ts";
-import { PRIORITIES, type Priority, type Task, type TaskComment } from "../types.ts";
+import { PRIORITIES, type Mention, type Priority, type Task, type TaskComment } from "../types.ts";
 import { record } from "./activity.ts";
 import { assertDueWithinBoard, getBoard } from "./boards.ts";
 import { getColumn, listColumns, resolveColumn } from "./columns.ts";
+import { insertComment, listComments } from "./comments.ts";
 import type { ActorContext } from "./context.ts";
+import { listMentions, recordMentions } from "./mentions.ts";
 import { positionAtIndex, positionForAppend } from "./positions.ts";
 import { requireUser } from "./users.ts";
 
@@ -369,37 +371,41 @@ export function listTasks(filter: ListTasksFilter = {}): TaskWithContext[] {
   }));
 }
 
-export function addComment(taskId: string, body: string, actor: ActorContext): TaskComment {
-  const task = getTask(taskId);
-  const text = body?.trim();
-  if (!text) throw badRequest("comment body is required");
-  if (text.length > 4000) throw badRequest("comment must be 4000 characters or fewer");
-
-  const id = newId("cmt");
-  write((db) => {
-    db.run("INSERT INTO task_comments (id, task_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)", [
-      id,
-      taskId,
-      actor.actorId,
-      text,
-      new Date().toISOString(),
-    ]);
-    record(db, actor, "task.commented", { boardId: task.boardId, taskId }, { commentId: id, chars: text.length });
-  });
-
-  log.info("comment added", { taskId, commentId: id, actor: actor.actorId, source: actor.source });
-  return getDb()
-    .query<CommentRow, [string]>("SELECT * FROM task_comments WHERE id = ?")
-    .all(id)
-    .map(toComment)[0]!;
+export interface AddCommentResult {
+  comment: TaskComment;
+  /** Requests this comment raised by naming an agent. Empty for ordinary notes. */
+  mentions: Mention[];
 }
 
-export function listComments(taskId: string): TaskComment[] {
-  getTask(taskId);
-  return getDb()
-    .query<CommentRow, [string]>("SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC")
-    .all(taskId)
-    .map(toComment);
+/**
+ * Appends a comment and promotes any `@agent` in it to a tracked request. The
+ * parse happens here, in the one write path both transports share, so a note
+ * left in the web UI and a note left over MCP raise a request identically.
+ */
+export function addCommentWithMentions(taskId: string, body: string, actor: ActorContext): AddCommentResult {
+  const task = getTask(taskId);
+  const target = { taskId, boardId: task.boardId };
+
+  const result = write((db) => {
+    const comment = insertComment(db, target, body, actor);
+    const mentions = recordMentions(db, { ...target, commentId: comment.id }, comment.body, actor);
+    return { comment, mentions };
+  });
+
+  log.info("comment added", {
+    taskId,
+    commentId: result.comment.id,
+    mentions: result.mentions.length,
+    actor: actor.actorId,
+    source: actor.source,
+    requestId: actor.requestId,
+  });
+  return result;
+}
+
+/** Comment-only view of the above, for callers that do not care about mentions. */
+export function addComment(taskId: string, body: string, actor: ActorContext): TaskComment {
+  return addCommentWithMentions(taskId, body, actor).comment;
 }
 
 /** Task plus everything needed to act on it without further lookups. */
@@ -413,6 +419,8 @@ export function getTaskDetail(taskId: string) {
     column,
     window: buildWindow(board.durationKind, board.startsAt, board.endsAt),
     comments: listComments(taskId),
+    /** Unresolved asks in this thread — the reason to read the card right now. */
+    openMentions: listMentions({ taskId, limit: 20 }),
     overdue: column.kind !== "done" && task.dueAt !== null && new Date(task.dueAt).getTime() < Date.now(),
   };
 }

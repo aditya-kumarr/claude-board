@@ -4,6 +4,9 @@ import type {
   BoardDetail,
   ColumnKind,
   DurationKind,
+  Mention,
+  MentionStatus,
+  MentionWithContext,
   Priority,
   Task,
   TaskComment,
@@ -118,6 +121,18 @@ export const api = {
   },
 
   comments: (taskId: string) => request<{ comments: TaskComment[] }>(`/tasks/${taskId}/comments`),
+  /**
+   * The response carries any `@claude` the comment raised, so the UI can confirm
+   * the request registered instead of leaving the user to infer it from a
+   * highlighted word.
+   */
   addComment: (taskId: string, text: string) =>
-    request<TaskComment>(`/tasks/${taskId}/comments`, { method: "POST", ...body({ body: text }) }),
+    request<TaskComment & { mentions: Mention[] }>(`/tasks/${taskId}/comments`, {
+      method: "POST",
+      ...body({ body: text }),
+    }),
+  mentions: (taskId: string, status?: MentionStatus) =>
+    request<{ mentions: MentionWithContext[] }>(
+      `/tasks/${taskId}/mentions${status ? `?status=${status}` : ""}`,
+    ),
 };
