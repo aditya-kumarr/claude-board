@@ -12,6 +12,7 @@ import { getColumn, listColumns, resolveColumn } from "./columns.ts";
 import { insertComment, listComments } from "./comments.ts";
 import type { ActorContext } from "./context.ts";
 import { listMentions, recordMentions } from "./mentions.ts";
+import { getTaskResponseSummary } from "./responses.ts";
 import { positionAtIndex, positionForAppend } from "./positions.ts";
 import { requireUser } from "./users.ts";
 
@@ -455,6 +456,12 @@ export function getTaskDetail(taskId: string) {
     comments: listComments(taskId),
     /** Unresolved asks in this thread — the reason to read the card right now. */
     openMentions: listMentions({ taskId, limit: 20 }),
+    /**
+     * The replies this card owes. Embedded rather than fetched separately because
+     * a card imported from a mail is not actionable without them: the message the
+     * user has to send back is half of what the card is for.
+     */
+    responses: getTaskResponseSummary(taskId),
     overdue: column.kind !== "done" && task.dueAt !== null && new Date(task.dueAt).getTime() < Date.now(),
   };
 }

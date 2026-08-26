@@ -13,7 +13,14 @@ import { EmptyState } from "@/components/ui/misc";
 import { Hint } from "@/components/ui/tooltip";
 import { TaskCard } from "@/components/task-card";
 import { cn } from "@/lib/utils";
-import { kindColor, type BoardColumn, type ColumnKind, type Task, type User } from "@/lib/types";
+import {
+  kindColor,
+  type BoardColumn,
+  type BoardResponseCount,
+  type ColumnKind,
+  type Task,
+  type User,
+} from "@/lib/types";
 
 export interface ColumnProps {
   column: BoardColumn;
@@ -22,6 +29,8 @@ export interface ColumnProps {
   now: number;
   /** Open `@claude` requests per task id, for the card badge. */
   mentionCounts: Map<string, number>;
+  /** Draft replies waiting per card, so a card can say it owes somebody an answer. */
+  responseCounts: Map<string, BoardResponseCount>;
   draggingTaskId: string | null;
   /** Index the dragged card would land at, or null when this column is not the drop target. */
   dropIndex: number | null;
@@ -47,6 +56,7 @@ export function BoardColumnView({
   users,
   now,
   mentionCounts,
+  responseCounts,
   draggingTaskId,
   dropIndex,
   onTaskDragStart,
@@ -158,6 +168,7 @@ export function BoardColumnView({
               users={users}
               now={now}
               openMentions={mentionCounts.get(task.id) ?? 0}
+              replies={responseCounts.get(task.id)}
               dragging={draggingTaskId === task.id}
               onOpen={() => onOpenTask(task.id)}
               onDragStart={(event) => {

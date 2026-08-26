@@ -176,10 +176,14 @@ export function listSyncRuns(filter: ListSyncRunsFilter = {}): SyncRunWithContex
   }
 
   const limit = Math.min(Math.max(filter.limit ?? 20, 1), 200);
+  // By time, not by id. Ids are random strings (`syn_2h4pnw5f`), so ordering by
+  // them sorts alphabetically — which silently made "the most recent run" an
+  // arbitrary one, and the board's Sync line show a stale result.
+  const direction = filter.oldestFirst ? "ASC" : "DESC";
   return getDb()
     .query<SyncRunContextRow, SQLQueryBindings[]>(
       `${CONTEXT_SELECT} ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-        ORDER BY r.id ${filter.oldestFirst ? "ASC" : "DESC"} LIMIT ?`,
+        ORDER BY datetime(r.created_at) ${direction}, r.rowid ${direction} LIMIT ?`,
     )
     .all(...params, limit)
     .map(toContext);
@@ -188,7 +192,11 @@ export function listSyncRuns(filter: ListSyncRunsFilter = {}): SyncRunWithContex
 /** Watermarks plus whatever request is outstanding — one read for the UI control. */
 export function getSyncSummary(boardId: string): BoardSyncSummary {
   const [activeRun] = listSyncRuns({ boardId, status: OPEN_SYNC_STATUSES, oldestFirst: true, limit: 1 });
-  const [lastRun] = listSyncRuns({ boardId, status: ["ok", "failed", "cancelled"], limit: 1 });
+  // Ordered by finish time: a run that started earlier can finish later, and it
+  // is the latest *result* the board should be reporting.
+  const [lastRun] = listSyncRuns({ boardId, status: ["ok", "failed", "cancelled"], limit: 30 }).sort((a, b) =>
+    (b.finishedAt ?? b.createdAt).localeCompare(a.finishedAt ?? a.createdAt),
+  );
   return {
     sources: getSyncStates(boardId),
     activeRun: activeRun ?? null,

@@ -13,8 +13,15 @@ import {
 } from "@automation/core";
 import { route } from "../middleware/errors.ts";
 import { actorFrom, boolQuery, param } from "./helpers.ts";
+import { taskResponsesRouter } from "./responses.ts";
 
 export const tasksRouter: Router = Router();
+
+/**
+ * A card's draft replies. Mounted before `/:taskId` so "responses" is never read
+ * as a task id, and nested so `:taskId` stays visible to the child router.
+ */
+tasksRouter.use("/:taskId/responses", taskResponsesRouter);
 
 /** Cross-board task query — powers both the UI's "My work" view and the agent's queue. */
 tasksRouter.get(

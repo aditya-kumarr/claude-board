@@ -1,4 +1,4 @@
-import { AlertTriangle, Archive, AtSign, CalendarRange, MoreHorizontal, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Archive, AtSign, CalendarRange, Loader2, MoreHorizontal, Plus, Sparkles, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress, Separator } from "@/components/ui/misc";
@@ -30,6 +30,7 @@ export function BoardHeader({
   onDelete,
   onSync,
   onCancelSync,
+  onOpenIntake,
   syncing,
 }: {
   detail: BoardDetail;
@@ -40,6 +41,8 @@ export function BoardHeader({
   onDelete: () => void;
   onSync: () => void;
   onCancelSync: () => void;
+  /** Opens the intake chat — paste raw material, get cards. */
+  onOpenIntake: () => void;
   /** True while the queue request itself is in flight. */
   syncing: boolean;
 }) {
@@ -68,6 +71,25 @@ export function BoardHeader({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Next to Sync because they are the two ways work arrives on a board:
+              Sync goes and finds it, this is you handing it over. */}
+          <Hint label="Paste a CSV, notes, a thread or a screenshot and get cards from it">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onOpenIntake}
+              disabled={board.archived}
+              className={cn(detail.intake.open > 0 && "border-primary/45 text-primary")}
+            >
+              {detail.intake.working ? <Loader2 className="animate-spin" /> : <Sparkles />}
+              Paste
+              {detail.intake.open > 0 ? (
+                <span className="rounded-full bg-primary/15 px-1.5 text-[10px] font-semibold text-primary">
+                  {detail.intake.open}
+                </span>
+              ) : null}
+            </Button>
+          </Hint>
           <SyncButton
             sync={detail.sync}
             disabled={board.archived}

@@ -146,6 +146,165 @@ export interface BoardSyncSummary {
   lastRun: SyncRun | null;
 }
 
+/* ---- draft replies ---- */
+
+/** An email carries a subject line; a Teams message does not. */
+export type ResponseChannel = "email" | "chat";
+/** `acknowledge` is the reply to send now, `completion` the one for when it is done. */
+export type ResponseStage = "acknowledge" | "completion";
+/** `sent` is the user recording that *they* sent it — nothing here sends anything. */
+export type ResponseStatus = "draft" | "approved" | "sent" | "discarded";
+export type ResponseOrigin = "outlook" | "teams" | "manual";
+export type ResponseTurnKind = "draft" | "revise" | "edit";
+export type ResponseTurnStatus = "pending" | "claimed" | "done" | "failed" | "cancelled";
+
+/** A draft reply owed to one person on one card. */
+export interface TaskResponse {
+  id: string;
+  taskId: string;
+  boardId: string;
+  channel: ResponseChannel;
+  stage: ResponseStage;
+  status: ResponseStatus;
+  recipientName: string;
+  recipientRef: string | null;
+  cc: string[];
+  /** `null` for a chat message, which has no subject line. */
+  subject: string | null;
+  body: string;
+  source: ResponseOrigin;
+  sourceRef: string | null;
+  createdBy: string;
+  actorSource: "web" | "mcp" | "system";
+  revision: number;
+  sentAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * One exchange about a draft — the queue and the chat transcript are the same
+ * table, because a pending turn is work and a finished one is a message.
+ */
+export interface ResponseTurn {
+  id: string;
+  responseId: string | null;
+  taskId: string;
+  boardId: string;
+  kind: ResponseTurnKind;
+  instruction: string;
+  status: ResponseTurnStatus;
+  requestedBy: string;
+  actorSource: "web" | "mcp" | "system";
+  attempts: number;
+  /** Claude's side of the exchange, or why it failed. */
+  note: string | null;
+  resultSubject: string | null;
+  resultBody: string | null;
+  claimedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
+export interface ResponseWithContext extends TaskResponse {
+  taskTitle: string;
+  taskDescription: string | null;
+  taskSourceRef: string | null;
+  taskDueAt: string | null;
+  taskCompletedAt: string | null;
+  columnKey: string;
+  columnName: string;
+  columnKind: ColumnKind;
+  boardName: string;
+  boardEndsAt: string;
+  /** Whether this is the one to send right now. */
+  dueNow: boolean;
+  turns: ResponseTurn[];
+  activeTurn: ResponseTurn | null;
+}
+
+export interface ResponseTurnWithContext extends ResponseTurn {
+  taskTitle: string;
+  taskDescription: string | null;
+  taskSourceRef: string | null;
+  taskDueAt: string | null;
+  columnKey: string;
+  columnName: string;
+  columnKind: ColumnKind;
+  boardName: string;
+  boardEndsAt: string;
+  requestedByName: string;
+  response: TaskResponse | null;
+}
+
+export interface TaskResponseSummary {
+  responses: ResponseWithContext[];
+  activeDraftTurn: ResponseTurn | null;
+}
+
+/** Per-card reply counts, carried on the board so cards can be badged. */
+export interface BoardResponseCount {
+  taskId: string;
+  open: number;
+  dueNow: number;
+  working: boolean;
+}
+
+/* ---- the board's intake chat ---- */
+
+export type IntakeStatus = "pending" | "claimed" | "done" | "failed" | "cancelled";
+/** `text` was decoded at upload and rides in the prompt; the rest is read from disk. */
+export type IntakeAttachmentKind = "text" | "image" | "pdf";
+
+export interface IntakeAttachment {
+  id: string;
+  messageId: string;
+  boardId: string;
+  filename: string;
+  mime: string;
+  kind: IntakeAttachmentKind;
+  bytes: number;
+  path: string;
+  text: string | null;
+  createdAt: string;
+}
+
+/** One turn of the chat: what was pasted, and what came of it. */
+export interface IntakeMessage {
+  id: string;
+  boardId: string;
+  instruction: string;
+  content: string | null;
+  status: IntakeStatus;
+  requestedBy: string;
+  actorSource: "web" | "mcp" | "system";
+  attempts: number;
+  /** Claude's reply, or why nothing happened. */
+  note: string | null;
+  /** Cards this message produced, rendered as chips in the chat. */
+  createdTasks: string[];
+  claimedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
+export interface IntakeMessageWithFiles extends IntakeMessage {
+  attachments: IntakeAttachment[];
+}
+
+export interface BoardIntakeSummary {
+  open: number;
+  working: boolean;
+  total: number;
+  lastMessageAt: string | null;
+}
+
+/** A file refused at upload, with the reason to show against it. */
+export interface IntakeRejection {
+  filename: string;
+  reason: string;
+}
+
 export interface ActivityEntry {
   id: number;
   boardId: string | null;
@@ -190,6 +349,8 @@ export interface BoardDetail {
   stats: BoardStats;
   openMentions: MentionWithContext[];
   sync: BoardSyncSummary;
+  responses: BoardResponseCount[];
+  intake: BoardIntakeSummary;
 }
 
 export interface TaskDetail {
@@ -199,6 +360,7 @@ export interface TaskDetail {
   window: BoardWindow;
   comments: TaskComment[];
   openMentions: MentionWithContext[];
+  responses: TaskResponseSummary;
   overdue: boolean;
 }
 
@@ -232,6 +394,30 @@ export const MENTION_STATUS_LABELS: Record<MentionStatus, string> = {
   answered: "Answered",
   dismissed: "Not actioned",
 };
+
+export const RESPONSE_CHANNEL_LABELS: Record<ResponseChannel, string> = { email: "Email", chat: "Teams" };
+
+/** Says what the stage *means*, not what it is called — the user never picked it. */
+export const RESPONSE_STAGE_LABELS: Record<ResponseStage, string> = {
+  acknowledge: "Send now",
+  completion: "When it's done",
+};
+
+export const RESPONSE_STAGE_HINTS: Record<ResponseStage, string> = {
+  acknowledge: "Confirms you have it and says what happens next.",
+  completion: "Reports the outcome. Comes due when this card reaches a done state.",
+};
+
+export const RESPONSE_STATUS_LABELS: Record<ResponseStatus, string> = {
+  draft: "Draft",
+  approved: "Ready to send",
+  sent: "Sent",
+  discarded: "Discarded",
+};
+
+/** Stage drives the accent, so the two kinds of reply are told apart at a glance. */
+export const stageColor = (stage: ResponseStage): string =>
+  stage === "acknowledge" ? "var(--kind-active)" : "var(--kind-done)";
 
 export const SYNC_SOURCE_LABELS: Record<SyncSource, string> = { outlook: "Outlook", teams: "Teams" };
 

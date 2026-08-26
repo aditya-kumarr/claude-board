@@ -5,7 +5,14 @@ import {
   type BoardColumn,
   type BoardDetail,
   type BoardSyncSummary,
+  type IntakeAttachment,
+  type IntakeMessageWithContext,
+  type IntakeMessageWithFiles,
   type MentionWithContext,
+  type ResponseTurn,
+  type ResponseTurnWithContext,
+  type ResponseWithContext,
+  type TaskResponseSummary,
   type SyncRunWithContext,
   type Task,
   type TaskComment,
@@ -31,7 +38,7 @@ export const who = (id: string | null): string =>
 
 function taskLine(
   task: Task | TaskWithContext,
-  options: { showBoard?: boolean; openMentions?: number } = {},
+  options: { showBoard?: boolean; openMentions?: number; replies?: { open: number; dueNow: number } } = {},
 ): string {
   const overdue = "overdue" in task ? task.overdue : false;
   const parts = [
@@ -40,6 +47,9 @@ function taskLine(
     `due=${shortDate(task.dueAt)}${overdue ? " OVERDUE" : ""}`,
   ];
   if (options.openMentions) parts.push(`@claude=${options.openMentions} WAITING`);
+  if (options.replies?.open) {
+    parts.push(`replies=${options.replies.open}${options.replies.dueNow ? ` (${options.replies.dueNow} to send now)` : ""}`);
+  }
   if (options.showBoard && "boardName" in task) parts.push(`board=${task.boardName}`);
   if (options.showBoard && "columnName" in task) parts.push(`state=${task.columnName}`);
   if (task.blockedReason) parts.push(`blocked=${task.blockedReason}`);
@@ -52,6 +62,7 @@ export function renderBoard(detail: BoardDetail, options: { includeDone?: boolea
   // and not just how many are.
   const waiting = new Map<string, number>();
   for (const mention of detail.openMentions) waiting.set(mention.taskId, (waiting.get(mention.taskId) ?? 0) + 1);
+  const replies = new Map(detail.responses.map((entry) => [entry.taskId, entry]));
   const deadline = window.expired
     ? `EXPIRED ${humanizeDuration(window.remainingMs)} ago`
     : `${humanizeDuration(window.remainingMs)} left`;
@@ -67,6 +78,8 @@ export function renderBoard(detail: BoardDetail, options: { includeDone?: boolea
       ? `>> ${stats.openMentions} unanswered @claude request(s) in this board's comments — call mentions to read them.`
       : null,
     syncLine(detail.sync),
+    responsesLine(detail.responses),
+    intakeLine(detail.intake),
     "",
   ].filter((line): line is string => line !== null);
 
@@ -79,12 +92,26 @@ export function renderBoard(detail: BoardDetail, options: { includeDone?: boolea
       `${column.name} [${column.key}] (${column.kind})  ${inColumn.length}${column.wipLimit ? `/${column.wipLimit}` : ""}`,
     );
     if (inColumn.length === 0) lines.push("  (empty)");
-    for (const task of shown) lines.push(taskLine(task, { openMentions: waiting.get(task.id) }));
+    for (const task of shown) {
+      lines.push(taskLine(task, { openMentions: waiting.get(task.id), replies: replies.get(task.id) }));
+    }
     if (hidden) lines.push(`  ... ${hidden} more done task(s); pass includeDone to list them`);
     lines.push("");
   }
 
   return lines.join("\n").trimEnd();
+}
+
+/** One line on the replies this board's cards still owe, or nothing to say. */
+function responsesLine(counts: BoardDetail["responses"]): string | null {
+  if (counts.length === 0) return null;
+  const open = counts.reduce((total, entry) => total + entry.open, 0);
+  const dueNow = counts.reduce((total, entry) => total + entry.dueNow, 0);
+  return (
+    `replies: ${open} draft(s) across ${counts.length} card(s)` +
+    (dueNow ? `, ${dueNow} ready for the user to send` : "") +
+    " — call responses to read them"
+  );
 }
 
 /** One line on where this board's inbox sync stands, or nothing to say. */
@@ -166,6 +193,7 @@ export function renderTaskDetail(input: {
   column: BoardColumn;
   overdue: boolean;
   openMentions?: MentionWithContext[];
+  responses?: TaskResponseSummary;
 }): string {
   const { task, board, column, overdue } = input;
   const open = input.openMentions ?? [];
@@ -183,6 +211,10 @@ export function renderTaskDetail(input: {
       : null,
     "",
     task.description ? `description:\n${task.description}` : "description: (none)",
+    "",
+    // Before the comments: on a card that came out of an inbox, the reply the
+    // user owes is the point of the card, not a footnote to it.
+    input.responses ? renderResponseSummary(input.responses) : null,
     "",
     "comments:",
     renderComments(listComments(task.id)),
@@ -223,6 +255,232 @@ export function renderMentions(mentions: MentionWithContext[], heading: string):
     "",
     mentions.map(renderMention).join("\n\n"),
   ].join("\n");
+}
+
+/* ---------------------------------------------------------------- responses */
+
+const STAGE_LABEL: Record<string, string> = {
+  acknowledge: "send now",
+  completion: "send when the work is done",
+};
+
+/**
+ * One draft reply in full. The body is included verbatim and unwrapped: the point
+ * of reading a draft is to judge the words, and a summary of a message is not a
+ * message.
+ */
+export function renderResponse(response: ResponseWithContext, options: { includeThread?: boolean } = {}): string {
+  const lines = [
+    `${response.id}  [${response.status}]  ${response.channel === "email" ? "EMAIL" : "TEAMS CHAT"}` +
+      `  stage=${response.stage} (${STAGE_LABEL[response.stage] ?? response.stage})` +
+      `${response.dueNow ? "  << SEND THIS ONE NOW" : ""}`,
+    `  to: ${response.recipientName}${response.recipientRef ? ` <${response.recipientRef}>` : ""}` +
+      (response.cc.length > 0 ? `  cc: ${response.cc.join(", ")}` : ""),
+    response.subject !== null ? `  subject: ${response.subject}` : null,
+    `  on task ${response.taskId} "${response.taskTitle}"  state=${response.columnName} (${response.columnKind})`,
+    response.sourceRef ? `  replying to: ${response.sourceRef}` : null,
+    `  revision ${response.revision}, updated ${shortDate(response.updatedAt)}` +
+      (response.sentAt ? `, marked sent ${shortDate(response.sentAt)} by the user` : ""),
+    "  --- body ---",
+    response.body
+      .split("\n")
+      .map((line) => `  ${line}`)
+      .join("\n"),
+    "  --- end ---",
+  ].filter((line): line is string => line !== null);
+
+  if (response.activeTurn) {
+    lines.push(
+      `  IN FLIGHT: ${response.activeTurn.id} [${response.activeTurn.status}] — "${response.activeTurn.instruction}"`,
+    );
+  }
+  if (options.includeThread && response.turns.length > 0) {
+    lines.push("  changes so far:", ...response.turns.map((turn) => `    ${turnLine(turn)}`));
+  }
+  return lines.join("\n");
+}
+
+/** One turn as a line of transcript: what was asked, and what came back. */
+const turnLine = (turn: ResponseTurn): string =>
+  `[${shortDate(turn.createdAt)}] ${turn.kind} (${turn.status}): ${turn.instruction}` +
+  (turn.note ? `  -> ${turn.note}` : "");
+
+export function renderResponses(responses: ResponseWithContext[], heading: string): string {
+  if (responses.length === 0) return `${heading}\n  (no replies drafted)`;
+  const due = responses.filter((response) => response.dueNow).length;
+  return [
+    `${heading}  --  ${responses.length} draft(s)${due ? `, ${due} to send now` : ""}`,
+    "",
+    responses.map((response) => renderResponse(response)).join("\n\n"),
+  ].join("\n");
+}
+
+/**
+ * A card's replies, compressed to one line each. Used inside `task_get`, where the
+ * card is the subject and the drafts are context — `responses` renders them in
+ * full when the drafts themselves are what is being read.
+ */
+export function renderResponseSummary(summary: TaskResponseSummary): string {
+  if (summary.responses.length === 0 && !summary.activeDraftTurn) {
+    return "replies: none drafted (response_draft writes one, and a synced card should have them)";
+  }
+  const lines = ["replies owed:"];
+  for (const response of summary.responses) {
+    lines.push(
+      `  ${response.id}  [${response.status}]  ${response.channel}  ${response.stage}` +
+        `  to ${response.recipientName}${response.dueNow ? "  << now" : ""}` +
+        (response.activeTurn ? `  (being rewritten)` : "") +
+        `\n      ${response.body.replace(/\s+/g, " ").slice(0, 140)}${response.body.length > 140 ? "…" : ""}`,
+    );
+  }
+  if (summary.activeDraftTurn) {
+    lines.push(`  a draft pass is queued for this card: ${summary.activeDraftTurn.id} [${summary.activeDraftTurn.status}]`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * A queued turn, rendered as the job spec rather than a summary: the instruction,
+ * the message it applies to, and the card it belongs to, so one call is enough to
+ * carry it out.
+ */
+export function renderResponseTurn(turn: ResponseTurnWithContext): string {
+  const lines = [
+    `${turn.id}  [${turn.status}]  kind=${turn.kind}  asked by ${turn.requestedByName} ${shortDate(turn.createdAt)} via ${turn.actorSource}`,
+    `  instruction: ${turn.instruction}`,
+    `  on task ${turn.taskId} "${turn.taskTitle}"  state=${turn.columnName} (${turn.columnKind})`,
+    `  board "${turn.boardName}" closes ${shortDate(turn.boardEndsAt)}`,
+    turn.taskSourceRef ? `  card imported from: ${turn.taskSourceRef}` : null,
+    turn.attempts > 1 ? `  attempt ${turn.attempts} — an earlier run did not finish` : null,
+  ].filter((line): line is string => line !== null);
+
+  if (turn.response) {
+    const response = turn.response;
+    lines.push(
+      `  the reply to change: ${response.id}  ${response.channel === "email" ? "EMAIL" : "TEAMS CHAT"}  stage=${response.stage}`,
+      `    to ${response.recipientName}${response.recipientRef ? ` <${response.recipientRef}>` : ""}`,
+      response.subject !== null ? `    subject: ${response.subject}` : "    (a chat message — no subject line)",
+      "    --- current body ---",
+      response.body
+        .split("\n")
+        .map((line) => `    ${line}`)
+        .join("\n"),
+      "    --- end ---",
+    );
+  }
+  if (turn.note) lines.push(`  outcome: ${turn.note}`);
+  return lines.join("\n");
+}
+
+export function renderResponseTurns(turns: ResponseTurnWithContext[], heading: string): string {
+  if (turns.length === 0) return `${heading}\n  (nothing queued)`;
+  return [
+    `${heading}  --  ${turns.length} turn(s), oldest first`,
+    "",
+    turns.map(renderResponseTurn).join("\n\n"),
+  ].join("\n");
+}
+
+/* ------------------------------------------------------------------- intake */
+
+const humanBytes = (bytes: number): string =>
+  bytes < 1024 ? `${bytes}B` : bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)}KB` : `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+
+/**
+ * Rough shape of a pasted block, so the model knows what it is looking at before
+ * reading it. A CSV's row and column count is the single most useful fact about it,
+ * and counting delimiters is cheap enough to be worth doing here.
+ */
+function shapeOf(text: string): string {
+  const lines = text.replace(/\n+$/, "").split("\n");
+  const first = lines[0] ?? "";
+  const commas = (first.match(/,/g) ?? []).length;
+  const tabs = (first.match(/\t/g) ?? []).length;
+  if (lines.length > 1 && (commas >= 1 || tabs >= 1)) {
+    const delimiter = tabs > commas ? "tab" : "comma";
+    return `${lines.length} line(s), looks ${delimiter}-separated with ${(tabs > commas ? tabs : commas) + 1} column(s)`;
+  }
+  return `${lines.length} line(s), ${text.length} chars`;
+}
+
+function attachmentLine(attachment: IntakeAttachment, absolutePath?: string): string {
+  const head = `  - ${attachment.filename}  [${attachment.kind}]  ${humanBytes(attachment.bytes)}`;
+  if (attachment.kind === "text") return `${head}  (contents inlined below)`;
+  return `${head}\n      open it with Read: ${absolutePath ?? "(path unavailable)"}`;
+}
+
+/**
+ * One queued paste, rendered as the job spec rather than a summary: the material
+ * itself is here in full, because the whole point is to act on it, and a truncated
+ * CSV would produce a truncated board.
+ */
+export function renderIntakeMessage(message: IntakeMessageWithContext): string {
+  const readable = new Map(message.readablePaths.map((entry) => [entry.id, entry.absolutePath]));
+  const lines = [
+    `${message.id}  [${message.status}]  pasted by ${message.requestedByName} ${shortDate(message.createdAt)} via ${message.actorSource}`,
+    `  board: "${message.boardName}" (${message.boardId})  window ${shortDate(message.boardStartsAt)} to ${shortDate(message.boardEndsAt)} [${message.boardDurationKind}]`,
+    message.boardDescription ? `  board note: ${message.boardDescription}` : null,
+    message.attempts > 1 ? `  attempt ${message.attempts} — an earlier run did not finish` : null,
+    "",
+    message.instruction
+      ? `WHAT THEY ASKED FOR:\n  ${message.instruction}`
+      : "WHAT THEY ASKED FOR:\n  (nothing typed — they pasted the material and left it to you)",
+  ].filter((line): line is string => line !== null);
+
+  if (message.attachments.length > 0) {
+    lines.push(
+      "",
+      `FILES (${message.attachments.length}):`,
+      ...message.attachments.map((attachment) => attachmentLine(attachment, readable.get(attachment.id))),
+    );
+  }
+
+  if (message.content) {
+    lines.push("", `PASTED CONTENT — ${shapeOf(message.content)}:`, "--- begin ---", message.content, "--- end ---");
+  }
+
+  for (const attachment of message.attachments) {
+    if (attachment.kind !== "text" || attachment.text === null) continue;
+    lines.push(
+      "",
+      `FILE "${attachment.filename}" — ${shapeOf(attachment.text)}:`,
+      "--- begin ---",
+      attachment.text,
+      "--- end ---",
+    );
+  }
+
+  if (message.note) lines.push("", `outcome: ${message.note}`);
+  if (message.createdTasks.length > 0) lines.push(`created: ${message.createdTasks.join(", ")}`);
+  return lines.join("\n");
+}
+
+/** Queue listing: enough to choose one, without dumping every CSV into the reply. */
+export function renderIntakeQueue(messages: IntakeMessageWithFiles[], heading: string): string {
+  if (messages.length === 0) return `${heading}\n  (nothing pasted)`;
+  const lines = [`${heading}  --  ${messages.length} message(s), oldest first`, ""];
+  for (const message of messages) {
+    const files = message.attachments.length > 0
+      ? `  files: ${message.attachments.map((file) => `${file.filename} [${file.kind}]`).join(", ")}`
+      : "";
+    lines.push(
+      `${message.id}  [${message.status}]  ${shortDate(message.createdAt)}  board=${message.boardId}`,
+      `  asked: ${message.instruction || "(nothing typed)"}`,
+      message.content ? `  pasted: ${shapeOf(message.content)}` : "",
+      files,
+      message.note ? `  outcome: ${message.note}` : "",
+      "",
+    );
+  }
+  return lines.filter((line) => line !== "").join("\n");
+}
+
+/** One line on a board's intake chat, or nothing to say. */
+function intakeLine(intake: BoardDetail["intake"]): string | null {
+  if (intake.open > 0) {
+    return `intake chat: ${intake.open} pasted message(s) waiting to be turned into cards — call intake_pending`;
+  }
+  return null;
 }
 
 export function renderActivity(entries: ActivityEntry[]): string {

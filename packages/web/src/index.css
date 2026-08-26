@@ -180,3 +180,7 @@
   from { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
   to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
 }
+/* The reply panel slides in from the edge rather than growing from the middle:
+   it sits over the card it belongs to, so it should read as coming alongside it. */
+@keyframes sheetIn  { from { opacity: 0; transform: translateX(2%); } to { opacity: 1; transform: none; } }
+@keyframes sheetOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(2%); } }

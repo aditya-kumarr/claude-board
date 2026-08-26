@@ -1,9 +1,9 @@
-import { AlertTriangle, AtSign, Ban, CalendarClock, Check, MessageSquare } from "lucide-react";
+import { AlertTriangle, AtSign, Ban, CalendarClock, Check, Loader2, MessageSquare, Reply } from "lucide-react";
 import { Avatar } from "@/components/ui/misc";
 import { Hint } from "@/components/ui/tooltip";
 import { formatDue } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { priorityColor, type ColumnKind, type Task, type User } from "@/lib/types";
+import { priorityColor, type BoardResponseCount, type ColumnKind, type Task, type User } from "@/lib/types";
 
 const ASSIGNEE_TINT: Record<string, string> = { me: "var(--kind-active)", claude: "var(--primary)" };
 
@@ -14,6 +14,8 @@ export interface TaskCardProps {
   now: number;
   /** Unresolved `@claude` requests in this card's thread. */
   openMentions?: number;
+  /** Draft replies held against this card, and how many are the user's to send. */
+  replies?: BoardResponseCount;
   dragging: boolean;
   onOpen: () => void;
   onDragStart: (event: React.DragEvent) => void;
@@ -31,6 +33,7 @@ export function TaskCard({
   users,
   now,
   openMentions = 0,
+  replies,
   dragging,
   onOpen,
   onDragStart,
@@ -117,6 +120,40 @@ export function TaskCard({
             >
               <AtSign className="size-2.5" />
               {openMentions > 1 ? `${openMentions} asks` : "asked"}
+            </span>
+          </Hint>
+        ) : null}
+
+        {/* A drafted reply is the other half of a card that came out of somebody's
+            inbox: the chip says one is waiting so it can be found without opening
+            every card, and highlights only when it is the user's to send. */}
+        {replies && replies.open > 0 ? (
+          <Hint
+            label={
+              replies.working
+                ? "Claude is rewriting one of this card's draft replies"
+                : replies.dueNow > 0
+                  ? `${replies.dueNow} draft repl${replies.dueNow > 1 ? "ies" : "y"} ready for you to send`
+                  : `${replies.open} draft repl${replies.open > 1 ? "ies" : "y"}, for when this card is done`
+            }
+          >
+            <span
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full px-1.5 py-px ring-1 ring-inset",
+                replies.dueNow > 0 && "font-medium",
+              )}
+              style={{
+                color: replies.dueNow > 0 ? "var(--kind-active)" : "var(--muted-foreground)",
+                backgroundColor:
+                  replies.dueNow > 0 ? "color-mix(in oklab, var(--kind-active) 12%, transparent)" : "transparent",
+                // @ts-expect-error CSS custom property for the ring color
+                "--tw-ring-color": `color-mix(in oklab, ${
+                  replies.dueNow > 0 ? "var(--kind-active)" : "var(--border)"
+                } 30%, transparent)`,
+              }}
+            >
+              {replies.working ? <Loader2 className="size-2.5 animate-spin" /> : <Reply className="size-2.5" />}
+              {replies.dueNow > 0 ? `${replies.dueNow} to send` : replies.open}
             </span>
           </Hint>
         ) : null}

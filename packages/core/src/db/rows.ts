@@ -16,6 +16,18 @@ import type {
   TaskComment,
   User,
   ActorSource,
+  ResponseChannel,
+  ResponseOrigin,
+  ResponseStage,
+  ResponseStatus,
+  ResponseTurn,
+  ResponseTurnKind,
+  ResponseTurnStatus,
+  TaskResponse,
+  IntakeAttachment,
+  IntakeAttachmentKind,
+  IntakeMessage,
+  IntakeStatus,
 } from "../types.ts";
 
 /** Raw snake_case shapes as they come back from bun:sqlite. */
@@ -107,6 +119,72 @@ export interface SyncRunRow {
   detail: string | null;
   started_at: string | null;
   finished_at: string | null;
+  created_at: string;
+}
+export interface ResponseRow {
+  id: string;
+  task_id: string;
+  board_id: string;
+  channel: string;
+  stage: string;
+  status: string;
+  recipient_name: string;
+  recipient_ref: string | null;
+  cc: string | null;
+  subject: string | null;
+  body: string;
+  source: string;
+  source_ref: string | null;
+  created_by: string;
+  actor_source: string;
+  revision: number;
+  sent_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface ResponseTurnRow {
+  id: string;
+  response_id: string | null;
+  task_id: string;
+  board_id: string;
+  kind: string;
+  instruction: string;
+  status: string;
+  requested_by: string;
+  actor_source: string;
+  attempts: number;
+  note: string | null;
+  result_subject: string | null;
+  result_body: string | null;
+  claimed_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+}
+export interface IntakeMessageRow {
+  id: string;
+  board_id: string;
+  instruction: string;
+  content: string | null;
+  status: string;
+  requested_by: string;
+  actor_source: string;
+  attempts: number;
+  note: string | null;
+  created_tasks: string | null;
+  claimed_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+}
+export interface IntakeAttachmentRow {
+  id: string;
+  message_id: string;
+  board_id: string;
+  filename: string;
+  mime: string;
+  kind: string;
+  bytes: number;
+  path: string;
+  text: string | null;
   created_at: string;
 }
 export interface ActivityRow {
@@ -249,3 +327,95 @@ export function toActivity(row: ActivityRow): ActivityEntry {
     createdAt: row.created_at,
   };
 }
+
+/** `cc` is stored as JSON; a malformed value must not make the draft unreadable. */
+function parseCc(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export const toResponse = (row: ResponseRow): TaskResponse => ({
+  id: row.id,
+  taskId: row.task_id,
+  boardId: row.board_id,
+  channel: row.channel as ResponseChannel,
+  stage: row.stage as ResponseStage,
+  status: row.status as ResponseStatus,
+  recipientName: row.recipient_name,
+  recipientRef: row.recipient_ref,
+  cc: parseCc(row.cc),
+  subject: row.subject,
+  body: row.body,
+  source: row.source as ResponseOrigin,
+  sourceRef: row.source_ref,
+  createdBy: row.created_by,
+  actorSource: row.actor_source as ActorSource,
+  revision: row.revision,
+  sentAt: row.sent_at,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const toResponseTurn = (row: ResponseTurnRow): ResponseTurn => ({
+  id: row.id,
+  responseId: row.response_id,
+  taskId: row.task_id,
+  boardId: row.board_id,
+  kind: row.kind as ResponseTurnKind,
+  instruction: row.instruction,
+  status: row.status as ResponseTurnStatus,
+  requestedBy: row.requested_by,
+  actorSource: row.actor_source as ActorSource,
+  attempts: row.attempts,
+  note: row.note,
+  resultSubject: row.result_subject,
+  resultBody: row.result_body,
+  claimedAt: row.claimed_at,
+  finishedAt: row.finished_at,
+  createdAt: row.created_at,
+});
+
+/** Ids of the cards a message produced. A malformed list must not hide the reply. */
+function parseIds(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export const toIntakeMessage = (row: IntakeMessageRow): IntakeMessage => ({
+  id: row.id,
+  boardId: row.board_id,
+  instruction: row.instruction,
+  content: row.content,
+  status: row.status as IntakeStatus,
+  requestedBy: row.requested_by,
+  actorSource: row.actor_source as ActorSource,
+  attempts: row.attempts,
+  note: row.note,
+  createdTasks: parseIds(row.created_tasks),
+  claimedAt: row.claimed_at,
+  finishedAt: row.finished_at,
+  createdAt: row.created_at,
+});
+
+export const toIntakeAttachment = (row: IntakeAttachmentRow): IntakeAttachment => ({
+  id: row.id,
+  messageId: row.message_id,
+  boardId: row.board_id,
+  filename: row.filename,
+  mime: row.mime,
+  kind: row.kind as IntakeAttachmentKind,
+  bytes: row.bytes,
+  path: row.path,
+  text: row.text,
+  createdAt: row.created_at,
+});

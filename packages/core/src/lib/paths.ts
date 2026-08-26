@@ -17,6 +17,12 @@ function fromEnv(name: string, fallback: string): string {
 
 export const DB_PATH = fromEnv("AUTOMATION_DB_PATH", "data/board.db");
 export const LOG_DIR = fromEnv("AUTOMATION_LOG_DIR", "logs");
+/**
+ * Files pasted into a board's intake chat. Attachment rows store a path *relative
+ * to this directory*, so moving the repo or pointing the database somewhere else
+ * does not orphan them.
+ */
+export const INTAKE_DIR = fromEnv("AUTOMATION_INTAKE_DIR", "data/intake");
 
 export function ensureDir(path: string): string {
   mkdirSync(path, { recursive: true });

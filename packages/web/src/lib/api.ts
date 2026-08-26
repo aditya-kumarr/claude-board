@@ -1,5 +1,8 @@
 import type {
   ActivityEntry,
+  BoardIntakeSummary,
+  IntakeMessageWithFiles,
+  IntakeRejection,
   BoardColumn,
   BoardDetail,
   BoardSyncSummary,
@@ -9,7 +12,13 @@ import type {
   MentionStatus,
   MentionWithContext,
   Priority,
+  ResponseStage,
+  ResponseStatus,
+  ResponseTurnWithContext,
+  ResponseWithContext,
   SyncRun,
+  TaskResponse,
+  TaskResponseSummary,
   SyncSource,
   Task,
   TaskComment,
@@ -150,6 +159,79 @@ export const api = {
       method: "POST",
       ...body({ body: text }),
     }),
+  /* ---- the board's intake chat ----
+   * Posting only queues: this process has no model access, so `202` with a pending
+   * message is the honest answer and the cards arrive on the revision poll.
+   * Attachments travel as base64 inside the JSON, which keeps the server free of a
+   * multipart dependency for a handful of files.
+   */
+  intake: (boardId: string, limit = 100) =>
+    request<{ messages: IntakeMessageWithFiles[]; summary: BoardIntakeSummary }>(
+      `/boards/${boardId}/intake?limit=${limit}`,
+    ),
+  postIntake: (
+    boardId: string,
+    payload: {
+      instruction?: string;
+      content?: string | null;
+      attachments?: Array<{ filename: string; mime?: string; data: string }>;
+    },
+  ) =>
+    request<{ message: IntakeMessageWithFiles; rejected: IntakeRejection[] }>(`/boards/${boardId}/intake`, {
+      method: "POST",
+      ...body(payload),
+    }),
+  /** Drops whatever is queued, so a dead run cannot wedge the composer. */
+  cancelIntake: (boardId: string, reason?: string) =>
+    request<IntakeMessageWithFiles>(`/boards/${boardId}/intake/pending`, { method: "DELETE", ...body({ reason }) }),
+  deleteIntakeMessage: (messageId: string) =>
+    request<{ id: string }>(`/intake/messages/${messageId}`, { method: "DELETE" }),
+  /** Direct URL, for an `<img>` or a link — not fetched through `request`. */
+  attachmentUrl: (attachmentId: string) => `/api/intake/attachments/${attachmentId}/content`,
+
+  /* ---- draft replies ----
+   * A card imported from a mail is half a card without the message the user owes
+   * back. Two of these only *queue* work: asking Claude to rewrite a draft, and
+   * asking for a card's first drafts, both need a model this process cannot reach,
+   * so they answer 202 and the result arrives on the revision poll. There is no
+   * send endpoint on purpose — `setResponseStatus(id, "sent")` records that the
+   * user sent it themselves.
+   */
+  taskResponses: (taskId: string) => request<TaskResponseSummary>(`/tasks/${taskId}/responses`),
+  /** Queues a first drafting pass, for a card a sync did not write replies for. */
+  requestDrafts: (taskId: string, instruction?: string) =>
+    request<{ turn: ResponseTurnWithContext; alreadyQueued: boolean }>(`/tasks/${taskId}/responses/draft`, {
+      method: "POST",
+      ...body({ instruction }),
+    }),
+  cancelDrafts: (taskId: string, reason?: string) =>
+    request<ResponseTurnWithContext>(`/tasks/${taskId}/responses/draft`, { method: "DELETE", ...body({ reason }) }),
+
+  getResponse: (responseId: string) => request<ResponseWithContext>(`/responses/${responseId}`),
+  /** Hand edits. Content only; status moves through its own route. */
+  updateResponse: (
+    responseId: string,
+    patch: {
+      body?: string;
+      subject?: string | null;
+      recipientName?: string;
+      recipientRef?: string | null;
+      cc?: string[];
+      stage?: ResponseStage;
+    },
+  ) => request<TaskResponse>(`/responses/${responseId}`, { method: "PATCH", ...body(patch) }),
+  setResponseStatus: (responseId: string, status: ResponseStatus) =>
+    request<TaskResponse>(`/responses/${responseId}/status`, { method: "POST", ...body({ status }) }),
+  /** Queues a rewrite. `alreadyQueued` means one was already in flight. */
+  reviseResponse: (responseId: string, instruction: string) =>
+    request<{ turn: ResponseTurnWithContext; alreadyQueued: boolean }>(`/responses/${responseId}/revise`, {
+      method: "POST",
+      ...body({ instruction }),
+    }),
+  cancelRevision: (responseId: string, reason?: string) =>
+    request<ResponseTurnWithContext>(`/responses/${responseId}/turn`, { method: "DELETE", ...body({ reason }) }),
+  deleteResponse: (responseId: string) => request<{ id: string }>(`/responses/${responseId}`, { method: "DELETE" }),
+
   mentions: (taskId: string, status?: MentionStatus) =>
     request<{ mentions: MentionWithContext[] }>(
       `/tasks/${taskId}/mentions${status ? `?status=${status}` : ""}`,

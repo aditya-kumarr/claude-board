@@ -8,6 +8,7 @@ import { BoardSidebar, type SidebarView } from "@/components/board-sidebar";
 import { BoardHeader } from "@/components/board-header";
 import { BoardColumnView } from "@/components/board-column";
 import { TaskDialog } from "@/components/task-dialog";
+import { IntakePanel } from "@/components/intake-panel";
 import { CreateBoardDialog } from "@/components/create-board-dialog";
 import { CreateTaskDialog } from "@/components/create-task-dialog";
 import { ColumnDialog } from "@/components/column-dialog";
@@ -36,6 +37,7 @@ export default function App() {
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [taskDialogColumn, setTaskDialogColumn] = useState<string | null>(null);
   const [columnDialogOpen, setColumnDialogOpen] = useState(false);
+  const [intakeOpen, setIntakeOpen] = useState(false);
   const [editingColumn, setEditingColumn] = useState<BoardColumn | null>(null);
 
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
@@ -43,6 +45,9 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem(VIEW_STORAGE_KEY, JSON.stringify(view));
+    // A chat belongs to one board; leaving it open across a switch would show the
+    // previous board's conversation over the new board's cards.
+    setIntakeOpen(false);
   }, [view]);
 
   // Fall back to a sensible view when the selected board disappears.
@@ -70,6 +75,16 @@ export default function App() {
     }
     return counts;
   }, [activeBoard?.openMentions]);
+
+  /**
+   * Draft replies per card, from the board payload for the same reason
+   * `mentionCounts` is: a badge that costs a request per card is a badge that
+   * will not be there.
+   */
+  const responseCounts = useMemo(
+    () => new Map((activeBoard?.responses ?? []).map((entry) => [entry.taskId, entry])),
+    [activeBoard?.responses],
+  );
 
   const fail = useCallback((message: string) => toast.error(message), []);
 
@@ -242,6 +257,7 @@ export default function App() {
                 onDelete={() => void removeBoard()}
                 onSync={() => void syncBoard()}
                 onCancelSync={() => void cancelSync()}
+                onOpenIntake={() => setIntakeOpen(true)}
                 syncing={syncing}
               />
 
@@ -262,6 +278,7 @@ export default function App() {
                     users={users}
                     now={now}
                     mentionCounts={mentionCounts}
+                    responseCounts={responseCounts}
                     draggingTaskId={draggingTaskId}
                     dropIndex={dropTarget?.columnId === column.id ? dropTarget.index : null}
                     onTaskDragStart={setDraggingTaskId}
@@ -315,10 +332,25 @@ export default function App() {
         </main>
       </div>
 
+      <IntakePanel
+        board={activeBoard}
+        open={intakeOpen}
+        onOpenChange={setIntakeOpen}
+        revisionKey={remoteChangeAt}
+        onChanged={() => void refresh()}
+        onOpenTask={(taskId) => {
+          // Leave the chat open behind the card: the reply that named it is the
+          // context for reading it, and closing it would lose the thread.
+          setOpenTaskId(taskId);
+        }}
+        onError={fail}
+      />
+
       <TaskDialog
         taskId={openTaskId}
         boards={boards}
         users={users}
+        revisionKey={remoteChangeAt}
         onClose={() => setOpenTaskId(null)}
         onChanged={() => void refresh()}
         onError={fail}

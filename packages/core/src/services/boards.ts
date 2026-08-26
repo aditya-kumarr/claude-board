@@ -11,6 +11,8 @@ import { USER_CLAUDE, USER_ME } from "../types.ts";
 import { record } from "./activity.ts";
 import type { ActorContext } from "./context.ts";
 import { listMentions } from "./mentions.ts";
+import { getIntakeSummary } from "./intake.ts";
+import { countBoardResponses } from "./responses.ts";
 import { getSyncSummary } from "./sync.ts";
 
 const log = createLogger("boards");
@@ -206,6 +208,8 @@ export function getBoardDetail(boardId: string): BoardDetail {
     stats: computeStats(boardId),
     openMentions: listMentions({ boardId, includeArchivedBoards: true, limit: 200 }),
     sync: getSyncSummary(boardId),
+    responses: countBoardResponses(boardId),
+    intake: getIntakeSummary(boardId),
   };
 }
 

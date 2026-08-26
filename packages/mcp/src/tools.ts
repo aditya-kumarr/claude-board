@@ -14,22 +14,39 @@ import {
   DURATION_KINDS,
   getBoardDetail,
   getTaskDetail,
+  cancelIntakeMessage,
+  cancelResponseTurn,
   cancelSyncRun,
   claimMention,
+  claimIntakeMessage,
+  claimResponseTurn,
+  completeIntakeMessage,
+  completeResponseTurn,
   claimSyncRun,
   completeSyncRun,
+  draftResponse,
+  getIntakeMessage,
+  getResponse,
   getSyncSummary,
+  getTaskResponseSummary,
   listActivity,
   listBoards,
   listColumns,
+  listIntakeMessages,
   listMentions,
+  listResponses,
+  listResponseTurns,
   listSyncRuns,
   listTasks,
   MENTION_STATUSES,
   moveTask,
   PRIORITIES,
   releaseMention,
+  requestResponseDrafts,
   requestSync,
+  RESPONSE_CHANNELS,
+  RESPONSE_STAGES,
+  RESPONSE_STATUSES,
   resolveMention,
   SYNC_SOURCES,
   updateBoard,
@@ -45,6 +62,12 @@ import {
   renderColumns,
   renderMention,
   renderMentions,
+  renderIntakeMessage,
+  renderIntakeQueue,
+  renderResponse,
+  renderResponses,
+  renderResponseTurn,
+  renderResponseTurns,
   renderSyncRun,
   renderSyncRuns,
   renderSyncState,
@@ -109,6 +132,8 @@ const columnKind = z.enum(COLUMN_KINDS);
 const assignee = z
   .string()
   .describe('Who owns the task: "me" for the human, "claude" for you. Aliases "you"/"i" also work.');
+const responseChannel = z.enum(RESPONSE_CHANNELS);
+const responseStage = z.enum(RESPONSE_STAGES);
 const columnRef = z
   .string()
   .describe('Target state: column id, key ("needs_review") or name ("Needs review"). Case-insensitive.');
@@ -412,15 +437,35 @@ export function registerTools(server: McpServer): void {
             `Take one with mention_claim, do it, then mention_resolve.\n\n`
           : "";
 
+      // Same reasoning as the mention banner: a change the user typed into a reply
+      // panel is a person watching a spinner, and a queue nobody is reminded of is
+      // a queue nobody checks.
+      const replyTurns = listResponseTurns({ boardId: args.boardId, status: "pending", oldestFirst: true, limit: 10 });
+      const replyBanner =
+        replyTurns.length > 0
+          ? `${renderResponseTurns(replyTurns, "QUEUED CHANGES TO DRAFT REPLIES — somebody is waiting on each of these")}\n\n` +
+            `Take one with response_claim, do it, then response_complete.\n\n`
+          : "";
+
+      // A paste is somebody who handed over their raw material and is watching the
+      // board for cards. Same reasoning as the two banners above it.
+      const pastes = listIntakeMessages({ boardId: args.boardId, status: "pending", limit: 10 });
+      const intakeBanner =
+        pastes.length > 0
+          ? `${renderIntakeQueue(pastes, "PASTED MATERIAL WAITING TO BECOME CARDS")}\n\n` +
+            `Take one with intake_claim, make the cards, then intake_complete.\n\n`
+          : "";
+
+      const waiting = pending.length + replyTurns.length + pastes.length;
       if (tasks.length === 0) {
-        return `${banner}${body}\n\n${
-          pending.length > 0
+        return `${banner}${replyBanner}${intakeBanner}${body}\n\n${
+          waiting > 0
             ? "No tasks are assigned to you, but the requests above are still waiting."
             : "Nothing is assigned to you right now."
         }`;
       }
       return (
-        `${banner}${body}\n\n` +
+        `${banner}${replyBanner}${intakeBanner}${body}\n\n` +
         `Next step: task_get for detail, then task_move to "doing" when you start and "done" (or "needs review") when finished.`
       );
     }),
@@ -716,10 +761,13 @@ export function registerTools(server: McpServer): void {
           : null,
         "  You have read access only. If an item needs a reply, that is a task for the user to do — never",
         "  send, forward or post anything yourself.",
-        "  Microsoft Graph throttles hard (HTTP 429 with a retryAfterSeconds). Page through results rather",
-        "  than issuing many small searches, wait out a 429 once, and if you are still throttled after that,",
-        "  stop and sync_complete with status=failed — the watermark stays put, so retrying later loses",
-        "  nothing. Half-reading the window and reporting ok is the one genuinely damaging outcome.",
+        "  Microsoft Graph throttles hard (HTTP 429). Page through results rather than issuing many small",
+        "  searches. When you are throttled you CANNOT WAIT IT OUT — you have no timer, no sleep and no shell,",
+        "  so \"I will retry shortly\" just ends the run with the request still open, which the user sees as a",
+        "  failure with nothing banked. Instead call sync_complete immediately with sourceStatus, marking the",
+        "  throttled source failed and any source you finished ok. That banks the half you read and re-reads",
+        "  only the half you did not. Reporting a whole window ok that you only half-read is the one genuinely",
+        "  damaging outcome.",
         "",
         "WHAT BECOMES A TASK — a thing the user still owes someone:",
         "  yes: a direct ask or assignment, a question awaiting their answer, a commitment they made,",
@@ -741,11 +789,31 @@ export function registerTools(server: McpServer): void {
         `             window (ends ${run.boardEndsAt}). Omit it to inherit the board deadline.`,
         "  priority   from the ask, not from the sender's tone. Default medium.",
         "",
+        "THEN DRAFT THE REPLY THE USER OWES (response_draft) — this is not optional:",
+        "  Every card here exists because a person is waiting on the user, so a card without a reply",
+        "  drafted is half a card. Right now is the ONLY moment you can write a good one: you have the",
+        "  message in front of you, and after this run ends nobody will.",
+        "  Per card, per person who needs an answer, write TWO drafts:",
+        "    stage=acknowledge  the reply to send now — confirms receipt, says what happens next, buys",
+        "                       the time the card needs. This is the one that stops a chaser mail.",
+        "    stage=completion   the reply to send once the work is done — reports the outcome. The user",
+        "                       sees it surface when the card reaches a done state.",
+        "  Pass recipientName and recipientRef (their address, or the chat id) so a re-run cannot",
+        "  duplicate a draft, and sourceRef so the user can find the original. The channel and an",
+        "  email's subject are inferred from the card; a Teams reply is one to three sentences with no",
+        "  greeting or sign-off, because that is what a chat message looks like.",
+        "  If more than one person needs a separate answer, draft one per person — do not merge them.",
+        "  Write in the user's voice, first person. Promise nothing the card does not support: no date",
+        "  it does not state, no commitment it does not contain. Nothing you write is sent by anything",
+        "  here — the user reads it, edits it if they want, and sends it themselves.",
+        "",
         "STATES ON THIS BOARD (imported cards belong in the leftmost/backlog one unless already underway):",
         renderColumns(board.columns),
         "",
-        `FINALLY: sync_complete ${run.id} with the count and a one-line summary of what you found and skipped.`,
-        "Complete it even when you import nothing — a run left running makes the board show a sync that never ends.",
+        `FINALLY: sync_complete ${run.id} with the count and a one-line summary of what you found and skipped —`,
+        "and say in it whether you got the replies drafted, since that is the half the user notices missing.",
+        "Complete it even when you import nothing, and complete it before you run out of room — a run left",
+        "running makes the board show a sync that never ends, and there is nobody to pick up where you stopped.",
       ]
         .filter((line): line is string => line !== null)
         .join("\n");
@@ -766,6 +834,12 @@ export function registerTools(server: McpServer): void {
           .describe(
             'Tasks created, per source — e.g. { "outlook": 2, "teams": 0 }. Name every source the run scanned; a total spread across both would credit Teams for Outlook mail.',
           ),
+        sourceStatus: z
+          .record(z.enum(SYNC_SOURCES), z.enum(["ok", "failed"]))
+          .optional()
+          .describe(
+            'Per-source outcome, for when one inbox was read fully and another was not — e.g. { "outlook": "ok", "teams": "failed" } after Graph throttled the Teams scan. Only sources marked ok advance their watermark, so the half you read is banked and only the half you did not is re-read. Prefer this over a blanket failed whenever you got through even one source: a blanket failed throws away work you actually did.',
+          ),
         detail: z
           .string()
           .describe(
@@ -785,6 +859,7 @@ export function registerTools(server: McpServer): void {
           imported?: Partial<Record<(typeof SYNC_SOURCES)[number], number>>;
           detail: string;
           status?: "ok" | "failed";
+          sourceStatus?: Partial<Record<(typeof SYNC_SOURCES)[number], "ok" | "failed">>;
         },
         ctx,
       ) => {
@@ -813,6 +888,391 @@ export function registerTools(server: McpServer): void {
     handler("sync_cancel", (args: { runId: string; reason: string }, ctx) => {
       const run = cancelSyncRun(args.runId, args.reason, ctx);
       return `Sync ${run.id} cancelled. Watermark unchanged.`;
+    }),
+  );
+
+/* --------------------------------------------------------------- responses */
+
+  server.registerTool(
+    "responses",
+    {
+      title: "Draft replies owed",
+      description:
+        "The reply drafts held against cards. Every synced card exists because somebody mailed or messaged the user, so the card is only half the job — this is the other half, the message they owe back. Each draft is EMAIL or TEAMS CHAT, and has a stage: 'acknowledge' is the reply to send now, 'completion' the one to send once the work is actually done. Nothing in this system sends anything; these are words waiting for the user, and 'sent' means the user sent it themselves. Read this when asked what still needs answering.",
+      inputSchema: {
+        taskId: z.string().optional().describe("Only this card's replies."),
+        boardId: z.string().optional().describe("Restrict to one board."),
+        channel: responseChannel.optional().describe("email or chat."),
+        stage: responseStage.optional(),
+        status: z
+          .enum(RESPONSE_STATUSES)
+          .optional()
+          .describe("Default is the open ones (draft + approved). 'sent' or 'discarded' to review history."),
+        dueNowOnly: z
+          .boolean()
+          .optional()
+          .describe("Only the drafts that are the user's to send right now — acknowledge replies, plus completion replies on cards that have reached a done state."),
+        limit: z.number().int().min(1).max(500).optional().describe("Default 100."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    handler(
+      "responses",
+      (args: {
+        taskId?: string;
+        boardId?: string;
+        channel?: string;
+        stage?: string;
+        status?: string;
+        dueNowOnly?: boolean;
+        limit?: number;
+      }) => {
+        const responses = listResponses(args as Parameters<typeof listResponses>[0]);
+        const body = renderResponses(responses, args.taskId ? `Replies on ${args.taskId}` : "Draft replies");
+        if (responses.length === 0) {
+          return `${body}\n\nNothing drafted. response_draft writes one; a card imported by a sync should have had them written at import time.`;
+        }
+        return (
+          `${body}\n\n` +
+          "To change one, the user normally types an instruction in the board's reply panel, which queues a turn — " +
+          "see response_pending. You can also rewrite one directly by claiming its turn, or draft a missing one with response_draft."
+        );
+      },
+    ),
+  );
+
+  server.registerTool(
+    "response_draft",
+    {
+      title: "Draft a reply",
+      description:
+        "Write one reply the user owes on a card, ready for them to send. Call it once per person per stage: a mail that needs a holding answer now and a real answer when the work lands is TWO drafts, not one. The channel defaults to whatever the card was imported over (mail is answered with mail), and an email's subject defaults to \"Re: <card title>\". A second draft for the same person at the same stage is rejected as a conflict naming the one that exists, so a repeat pass cannot leave the user with two versions of one reply. Write in the user's voice, first person, as the person who owes the reply — not about them. You are drafting, never sending: say nothing you are not sure of, and never promise a date the card does not support.",
+      inputSchema: {
+        taskId: z.string().describe("The card this reply belongs to."),
+        stage: responseStage.describe(
+          "'acknowledge' for the reply to send now — confirms receipt, says what happens next, buys the time the card needs. 'completion' for the one to send once the work is done — reports the outcome. The completion draft is written now, while the context is in front of you, and surfaces to the user when the card reaches a done state.",
+        ),
+        recipientName: z.string().describe('Who it goes to, as a person: "Priya Sharma".'),
+        recipientRef: z
+          .string()
+          .optional()
+          .describe(
+            "Their address or chat id. This is the slot key that stops duplicate drafts, so pass it whenever the source gives you one.",
+          ),
+        body: z
+          .string()
+          .describe(
+            "The message itself, ready to send. Plain text, with the line breaks it should keep. For email include a greeting and a sign-off; for a Teams chat write one to three sentences with neither, because that is what a chat message looks like.",
+          ),
+        channel: responseChannel
+          .optional()
+          .describe("Override the inferred channel. An email carries a subject; a chat message must not."),
+        subject: z
+          .string()
+          .optional()
+          .describe('Email only, and rejected for a chat. Defaults to "Re: <card title>".'),
+        cc: z.array(z.string()).optional().describe("Additional addresses. Email only."),
+        sourceRef: z
+          .string()
+          .optional()
+          .describe(
+            'The message being replied to, as "<source>:<id>". Defaults to the card\'s own import key. Provenance, so the user can find the original.',
+          ),
+      },
+    },
+    handler(
+      "response_draft",
+      ({ taskId, ...input }: { taskId: string } & Parameters<typeof draftResponse>[1], ctx) => {
+      const response = draftResponse(taskId, input, ctx);
+        return `Reply drafted for the user to send.\n\n${renderResponse(getResponse(response.id))}`;
+      },
+    ),
+  );
+
+  server.registerTool(
+    "response_pending",
+    {
+      title: "Queued reply changes",
+      description:
+        "Changes the user asked for on their draft replies, oldest first. The board app cannot ask you anything — it has no model access — so typing \"make this shorter\" into a reply panel only queues the ask, and carrying it out is your job. A 'revise' turn changes one message; a 'draft' turn asks for a card's replies to be written from scratch. Check here alongside mentions and sync_pending when catching up: somebody is watching a spinner for each of these.",
+      inputSchema: {
+        taskId: z.string().optional().describe("Only turns on this card."),
+        boardId: z.string().optional(),
+        includeFinished: z.boolean().optional().describe("Also list finished turns. Default false."),
+        limit: z.number().int().min(1).max(200).optional().describe("Default 20."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    handler("response_pending", (args: { taskId?: string; boardId?: string; includeFinished?: boolean; limit?: number }) => {
+      const turns = listResponseTurns({
+        taskId: args.taskId,
+        boardId: args.boardId,
+        status: args.includeFinished ? undefined : ["pending", "claimed"],
+        oldestFirst: !args.includeFinished,
+        limit: args.limit ?? 20,
+      });
+      const body = renderResponseTurns(turns, args.includeFinished ? "Reply changes" : "Queued reply changes");
+      if (turns.length === 0) return `${body}\n\nNothing waiting. responses lists the drafts themselves.`;
+      return `${body}\n\nNext step: response_claim <turnId> — it returns the instruction and the message it applies to.`;
+    }),
+  );
+
+  server.registerTool(
+    "response_claim",
+    {
+      title: "Take a queued reply change",
+      description:
+        "Claim one queued change so a second run of you does not rewrite the same message twice, and get everything needed to do it: the instruction in the user's words, the current message in full, and the card it belongs to. Claim before writing; finish with response_complete.",
+      inputSchema: { turnId: z.string().describe("Turn id from response_pending, e.g. rtn_a1b2c3d4.") },
+    },
+    handler("response_claim", (args: { turnId: string }, ctx) => {
+      const turn = claimResponseTurn(args.turnId, ctx);
+      const rules = [
+        "",
+        "HOW TO CARRY IT OUT:",
+        turn.kind === "revise"
+          ? "  Rewrite the WHOLE message, applying the instruction and changing nothing else. The user is\n" +
+            "  iterating on words they are about to send, so an unasked-for change to a sentence they were\n" +
+            "  happy with is a change they have to spot and undo. Keep their voice; keep it first person.\n" +
+            "  Then call response_complete with the full new body and a one-line note saying what you changed —\n" +
+            "  that note is what they read in the panel, so write it to them, not about the task."
+          : "  Write the replies this card needs with response_draft — normally two per correspondent:\n" +
+            "  stage=acknowledge to send now, stage=completion to send once the work is done. Read the card's\n" +
+            "  description for who asked and what they asked for; that is the only provenance you have.\n" +
+            "  Then call response_complete with a one-line note saying what you drafted.",
+        "",
+        "  You are drafting, never sending, and you cannot see the original mailbox from here — work from",
+        "  the card. Do not invent facts, dates or names that are not on it; if the card does not say when",
+        "  something will be done, write a reply that does not promise a date.",
+        `  Finish with response_complete ${turn.id}. A turn left claimed shows the user a change that never`,
+        "  arrives, which is worse than one that failed with a reason.",
+      ].join("\n");
+      return `Claimed ${turn.id}.\n\n${renderResponseTurn(turn)}\n${rules}`;
+    }),
+  );
+
+  server.registerTool(
+    "response_complete",
+    {
+      title: "Close out a reply change",
+      description:
+        "Finish a claimed turn. For a 'revise' this is also how the new message lands: pass the full rewritten body and it replaces the draft in the same transaction, so the thread and the text can never disagree. `note` is your side of the conversation — one line the user reads under their instruction. Use status=failed when you could not do what was asked, with the reason in the note: the draft then keeps its old text and the user can see why, which silence does not give them.",
+      inputSchema: {
+        turnId: z.string(),
+        note: z
+          .string()
+          .describe(
+            "One line to the user: what you changed, or why you could not. Shown in the reply panel under their instruction.",
+          ),
+        body: z
+          .string()
+          .optional()
+          .describe(
+            "The complete rewritten message. Required to finish a 'revise' successfully — a partial or omitted body would leave the draft as it was while the thread claimed it changed. Not used by a 'draft' turn, which creates messages with response_draft.",
+          ),
+        subject: z
+          .string()
+          .optional()
+          .describe("New subject, when the instruction changed it. Email only."),
+        status: z
+          .enum(["done", "failed"])
+          .optional()
+          .describe("Default done. Use failed when the instruction could not be carried out."),
+      },
+    },
+    handler(
+      "response_complete",
+      (args: { turnId: string; note: string; body?: string; subject?: string; status?: "done" | "failed" }, ctx) => {
+        const { turnId, ...input } = args;
+        const turn = completeResponseTurn(turnId, input, ctx);
+        if (turn.response) {
+          return `Turn ${turn.id} marked ${turn.status}.\n\n${renderResponse(getResponse(turn.response.id))}`;
+        }
+        return (
+          `Turn ${turn.id} marked ${turn.status}.\n\n` +
+          renderResponses(listResponses({ taskId: turn.taskId, status: RESPONSE_STATUSES }), `Replies on ${turn.taskId}`)
+        );
+      },
+    ),
+  );
+
+  server.registerTool(
+    "response_request",
+    {
+      title: "Queue a reply-drafting pass",
+      description:
+        "Ask for a card's replies to be drafted, as the board's \"Draft replies\" button does. Use it for a card that has none — one typed in by hand, or one whose drafts were discarded — when you are not going to write them yourself in this session. If you are already looking at the card, response_draft is more direct. Asking twice does not stack: an outstanding request is returned as-is.",
+      inputSchema: {
+        taskId: z.string(),
+        instruction: z
+          .string()
+          .optional()
+          .describe("What the drafts should cover, if anything beyond the default acknowledge + completion pair."),
+      },
+    },
+    handler("response_request", (args: { taskId: string; instruction?: string }, ctx) => {
+      const { turn, alreadyQueued } = requestResponseDrafts(args.taskId, args.instruction, ctx);
+      return (
+        `${alreadyQueued ? "A drafting pass was already queued for this card." : "Drafting pass queued."}\n\n` +
+        `${renderResponseTurn(turn)}\n\nNext step: response_claim ${turn.id}.`
+      );
+    }),
+  );
+
+  server.registerTool(
+    "response_cancel",
+    {
+      title: "Abandon a queued reply change",
+      description:
+        "Drop a queued or claimed turn without changing the draft — for a request that is no longer wanted, or one left claimed by a dead run. Prefer response_complete with status=failed when you tried and could not do it, so the reason reaches the user.",
+      inputSchema: { turnId: z.string(), reason: z.string().describe("Why it is being abandoned.") },
+      annotations: { destructiveHint: true },
+    },
+    handler("response_cancel", (args: { turnId: string; reason: string }, ctx) => {
+      const turn = cancelResponseTurn(args.turnId, args.reason, ctx);
+      return `Turn ${turn.id} cancelled. The draft is unchanged.`;
+    }),
+  );
+
+/* ------------------------------------------------------------------ intake */
+
+  server.registerTool(
+    "intake_pending",
+    {
+      title: "Pasted material waiting to become cards",
+      description:
+        "Each board has a chat the user pastes raw material into — a CSV export, notes from a call, a forwarded thread, a screenshot of a whiteboard — and this is what is waiting to be turned into cards. The board app cannot read any of it into tasks itself; it has no model access, so pasting is all it can do and the rest is your job. Check here alongside mentions, sync_pending and response_pending when catching up: each of these is a person who pasted something and is watching for cards to appear.",
+      inputSchema: {
+        boardId: z.string().optional().describe("Restrict to one board."),
+        includeFinished: z.boolean().optional().describe("Also list messages already handled. Default false."),
+        limit: z.number().int().min(1).max(200).optional().describe("Default 20."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    handler("intake_pending", (args: { boardId?: string; includeFinished?: boolean; limit?: number }) => {
+      const messages = listIntakeMessages({
+        boardId: args.boardId,
+        status: args.includeFinished ? undefined : ["pending", "claimed"],
+        limit: args.limit ?? 20,
+      });
+      const body = renderIntakeQueue(messages, args.includeFinished ? "Intake messages" : "Pasted, waiting to be read");
+      if (messages.length === 0) return `${body}\n\nNothing waiting.`;
+      return `${body}\n\nNext step: intake_claim <messageId> — it returns the material in full plus the board's states.`;
+    }),
+  );
+
+  server.registerTool(
+    "intake_claim",
+    {
+      title: "Take a pasted message and read it",
+      description:
+        "Claim one pasted message so a second run of you does not create the same cards twice, and get everything needed to act: what the user typed, the pasted text in full, the contents of any text file they attached, the on-disk path of any screenshot or PDF to open with Read, the board's states, and the board's deadline. Claim before creating anything; finish with intake_complete.",
+      inputSchema: { messageId: z.string().describe("Message id from intake_pending, e.g. itk_a1b2c3d4.") },
+    },
+    handler("intake_claim", (args: { messageId: string }, ctx) => {
+      const message = claimIntakeMessage(args.messageId, ctx);
+      const board = getBoardDetail(message.boardId);
+      const existing = listTasks({ boardId: message.boardId, includeDone: true, limit: 500 });
+
+      return [
+        `Claimed ${message.id}.`,
+        "",
+        renderIntakeMessage(message),
+        "",
+        message.readablePaths.length > 0
+          ? "FILES TO OPEN — use Read on each path above. A screenshot is often the only place the real\n" +
+            "  detail lives, so read it before deciding what the cards are. If Read is not available to you,\n" +
+            "  say so in intake_complete rather than guessing at what the image said."
+          : "Everything the user gave you is inline above. There are no files to open.",
+        "",
+        "WHAT TO MAKE OF IT:",
+        "  Follow what they typed. It usually says the shape they want — one card per row, one per",
+        "  action item, only the open ones — and that instruction beats your own reading of the data.",
+        "  When they typed nothing, infer the obvious: a CSV of work becomes a card per row; notes from",
+        "  a call become a card per action item; a screenshot of a plan becomes a card per box on it.",
+        "",
+        "  A row is not automatically a task. Skip headers, totals, blank rows, and anything the data",
+        "  itself marks as already finished or cancelled — and say in your reply that you skipped it, so",
+        "  they can disagree. Making 40 cards from a 40-row export that included 12 done rows is worse",
+        "  than making 28 and saying why.",
+        "",
+        "  Map columns onto the card rather than dumping them in the title. An owner column is the",
+        "  assignee (\"me\" for the user, \"claude\" for you — only for work you can actually do). A date",
+        `  column is dueAt, and it must fall inside the board window (ends ${message.boardEndsAt}); a date`,
+        "  outside it is rejected, so leave it out and note that it fell outside rather than silently",
+        "  moving their deadline. A priority or severity column maps onto priority. Anything left over",
+        "  goes in the description, along with where the row came from — that provenance is the only",
+        "  record of what produced this card.",
+        "",
+        "  Do NOT invent work that was not in the material. If it is ambiguous, make the cards you are",
+        "  sure of and name the ambiguity in your reply: you are unattended and there is nobody to ask.",
+        "",
+        "  Duplicates: this board already has the cards listed below. If the paste covers work that is",
+        "  already there, update or skip rather than adding a second card for it, and say which.",
+        "",
+        "STATES ON THIS BOARD (new cards belong in the leftmost/backlog one unless the data says otherwise):",
+        renderColumns(board.columns),
+        "",
+        existing.length > 0
+          ? `ALREADY ON THIS BOARD (${existing.length}) — check against these before creating:\n${renderTaskList(existing, "existing cards")}`
+          : "This board has no cards yet, so nothing can be a duplicate.",
+        "",
+        `FINALLY: intake_complete ${message.id} with the ids you created and a reply written to the user —`,
+        "what you made, what you skipped and why. That text is the message they see in the chat, so it is",
+        "the only account they get of your judgement. Complete it even if you create nothing; a message",
+        "left claimed shows them a paste that is still being read forever.",
+      ].join("\n");
+    }),
+  );
+
+  server.registerTool(
+    "intake_complete",
+    {
+      title: "Reply in the intake chat",
+      description:
+        "Finish a claimed message. `createdTasks` are the ids task_create returned, and they are checked against the board — the chat renders them as links, so a reply naming cards that are not there reads as work having been done when it was not. `note` is your reply in the conversation: say what you made, what you skipped and why, and name anything you were unsure about. Use status=failed when you could not use the material at all, with the reason — a paste that produces silence is the one outcome the user cannot act on.",
+      inputSchema: {
+        messageId: z.string(),
+        note: z
+          .string()
+          .describe(
+            "Your reply, written to the user. What you made, what you deliberately left out, and anything they should decide themselves.",
+          ),
+        createdTasks: z
+          .array(z.string())
+          .optional()
+          .describe("Ids of the cards you created for this message, exactly as task_create returned them."),
+        status: z
+          .enum(["done", "failed"])
+          .optional()
+          .describe("Default done. Use failed when the material could not be used, with the reason in the note."),
+      },
+    },
+    handler(
+      "intake_complete",
+      (args: { messageId: string; note: string; createdTasks?: string[]; status?: "done" | "failed" }, ctx) => {
+        const { messageId, ...input } = args;
+        const message = completeIntakeMessage(messageId, input, ctx);
+        return (
+          `Replied in the intake chat; message ${message.id} marked ${message.status}.\n\n` +
+          renderBoard(getBoardDetail(message.boardId))
+        );
+      },
+    ),
+  );
+
+  server.registerTool(
+    "intake_cancel",
+    {
+      title: "Abandon a pasted message",
+      description:
+        "Drop a queued or claimed intake message without creating anything — for material that is no longer wanted, or one left claimed by a dead process. Prefer intake_complete with status=failed when you looked at it and could not use it, so the reason reaches the user.",
+      inputSchema: { messageId: z.string(), reason: z.string().describe("Why it is being abandoned.") },
+      annotations: { destructiveHint: true },
+    },
+    handler("intake_cancel", (args: { messageId: string; reason: string }, ctx) => {
+      const message = cancelIntakeMessage(args.messageId, args.reason, ctx);
+      return `Intake message ${message.id} cancelled. Nothing was created.`;
     }),
   );
 

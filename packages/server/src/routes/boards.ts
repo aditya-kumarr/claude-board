@@ -19,8 +19,15 @@ import {
 } from "@automation/core";
 import { route } from "../middleware/errors.ts";
 import { actorFrom, param } from "./helpers.ts";
+import { intakeRouter } from "./intake.ts";
 
 export const boardsRouter: Router = Router();
+
+/**
+ * The board's intake chat. Nested so `:boardId` stays visible to the child router,
+ * which needs its own body limit for base64 attachments.
+ */
+boardsRouter.use("/:boardId/intake", intakeRouter);
 
 boardsRouter.get(
   "/",

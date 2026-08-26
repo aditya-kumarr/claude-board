@@ -18,7 +18,9 @@
     "db:reset": "rm -f data/board.db data/board.db-wal data/board.db-shm && bun run --cwd packages/server migrate",
     "db:seed": "bun run --cwd packages/server seed",
     "watch:mentions": "bun scripts/watch-mentions.ts",
-    "watch:sync": "bun scripts/watch-sync.ts"
+    "watch:sync": "bun scripts/watch-sync.ts",
+    "watch:responses": "bun scripts/watch-responses.ts",
+    "watch:intake": "bun scripts/watch-intake.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.2",

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AtSign, Ban, Check, Clock, Loader2, Pencil, Send, Sparkles, Trash2, User as UserIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -9,6 +9,8 @@ import { Avatar, Separator } from "@/components/ui/misc";
 import { Badge } from "@/components/ui/badge";
 import { Hint } from "@/components/ui/tooltip";
 import { agentHandles, hasAgentMention, MentionText } from "@/components/mention-text";
+import { ResponseBoxes } from "@/components/response-boxes";
+import { ResponsePanel } from "@/components/response-panel";
 import { api, ApiError } from "@/lib/api";
 import { formatDateTime, relativeTime, toLocalInputValue, fromLocalInputValue } from "@/lib/format";
 import {
@@ -21,6 +23,7 @@ import {
   type MentionWithContext,
   type Priority,
   type TaskComment,
+  type TaskResponseSummary,
   type User,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -40,6 +43,13 @@ export interface TaskDialogProps {
   taskId: string | null;
   boards: BoardDetail[];
   users: User[];
+  /**
+   * Moves when the revision poll sees a change made outside this tab. Draft
+   * replies live off the board payload, so without this a rewrite Claude finished
+   * would sit unseen in an open dialog — the card's own `updatedAt` does not move
+   * when one of its replies is rewritten.
+   */
+  revisionKey: number | null;
   onClose: () => void;
   onChanged: () => void;
   onError: (message: string) => void;
@@ -53,7 +63,7 @@ export interface TaskDialogProps {
  * comment box stays live in both modes — it is the hand-off channel to Claude,
  * not an edit to the card.
  */
-export function TaskDialog({ taskId, boards, users, onClose, onChanged, onError }: TaskDialogProps) {
+export function TaskDialog({ taskId, boards, users, revisionKey, onClose, onChanged, onError }: TaskDialogProps) {
   const board = boards.find((entry) => entry.tasks.some((task) => task.id === taskId));
   const task = board?.tasks.find((entry) => entry.id === taskId) ?? null;
   const column = board?.columns.find((entry) => entry.id === task?.columnId) ?? null;
@@ -66,6 +76,10 @@ export function TaskDialog({ taskId, boards, users, onClose, onChanged, onError 
   const [draft, setDraft] = useState("");
   const [posting, setPosting] = useState(false);
   const draftRef = useRef<HTMLTextAreaElement>(null);
+
+  const [responses, setResponses] = useState<TaskResponseSummary>({ responses: [], activeDraftTurn: null });
+  const [openResponseId, setOpenResponseId] = useState<string | null>(null);
+  const [draftingReplies, setDraftingReplies] = useState(false);
 
   const handles = useMemo(() => agentHandles(users), [users]);
   /** Which comments asked Claude for something, and where each ask got to. */
@@ -82,6 +96,7 @@ export function TaskDialog({ taskId, boards, users, onClose, onChanged, onError 
   /** Every card opens read-only, including the next one opened without closing the dialog. */
   useEffect(() => {
     setEditing(false);
+    setOpenResponseId(null);
   }, [taskId]);
 
   useEffect(() => {
@@ -110,6 +125,60 @@ export function TaskDialog({ taskId, boards, users, onClose, onChanged, onError 
       cancelled = true;
     };
   }, [taskId, task?.updatedAt, board?.openMentions.length]);
+
+  /**
+   * The card's draft replies, re-read on every remote change rather than on the
+   * card's own timestamp: rewriting a reply does not touch the task row, so
+   * keying this off `task.updatedAt` would leave the panel showing the old words.
+   */
+  const reloadResponses = useCallback(async () => {
+    if (!taskId) return;
+    try {
+      setResponses(await api.taskResponses(taskId));
+    } catch {
+      // A failed read must not blank a panel the user is reading; the next poll retries.
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    if (!taskId) {
+      setResponses({ responses: [], activeDraftTurn: null });
+      return;
+    }
+    void reloadResponses();
+  }, [taskId, reloadResponses, revisionKey]);
+
+  const openResponse = useMemo(
+    () => responses.responses.find((entry) => entry.id === openResponseId) ?? null,
+    [responses.responses, openResponseId],
+  );
+
+  /** Queues a drafting pass. Nothing is written yet when this resolves. */
+  const requestDrafts = async () => {
+    if (!taskId) return;
+    setDraftingReplies(true);
+    try {
+      const { alreadyQueued } = await api.requestDrafts(taskId);
+      await reloadResponses();
+      onChanged();
+      if (alreadyQueued) onError("A drafting pass for this card is already queued.");
+    } catch (error) {
+      onError(error instanceof ApiError ? error.message : "Could not ask for the replies");
+    } finally {
+      setDraftingReplies(false);
+    }
+  };
+
+  const cancelDrafts = async () => {
+    if (!taskId) return;
+    try {
+      await api.cancelDrafts(taskId);
+      await reloadResponses();
+      onChanged();
+    } catch (error) {
+      onError(error instanceof ApiError ? error.message : "Could not cancel that");
+    }
+  };
 
   const patch = async (body: Parameters<typeof api.updateTask>[1]) => {
     if (!taskId) return;
@@ -441,6 +510,20 @@ export function TaskDialog({ taskId, boards, users, onClose, onChanged, onError 
 
             <Separator />
 
+            {/* Above the thread on purpose: on a card that came out of somebody's
+                mail, the reply owed back is the point of the card, and the thread
+                is the conversation *about* it. */}
+            <ResponseBoxes
+              summary={responses}
+              imported={task.sourceRef !== null}
+              busy={draftingReplies}
+              onOpen={(response) => setOpenResponseId(response.id)}
+              onRequestDrafts={() => void requestDrafts()}
+              onCancelDrafts={() => void cancelDrafts()}
+            />
+
+            <Separator />
+
             <section className="space-y-2">
               <h3 className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 Thread
@@ -616,6 +699,18 @@ export function TaskDialog({ taskId, boards, users, onClose, onChanged, onError 
           </>
         ) : null}
       </DialogContent>
+
+      {/* A sheet over the dialog rather than a route: the card stays visible
+          behind it, which is what makes the message readable in context. */}
+      <ResponsePanel
+        response={openResponse}
+        onClose={() => setOpenResponseId(null)}
+        onChanged={() => {
+          void reloadResponses();
+          onChanged();
+        }}
+        onError={onError}
+      />
     </Dialog>
   );
 }

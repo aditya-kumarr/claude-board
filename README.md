@@ -19,6 +19,15 @@ Boards can also fill themselves: **Sync** reads your Outlook and Teams since it 
 adds a card for anything still waiting on you. See
 [Pulling work in](#pulling-work-in-from-outlook-and-teams).
 
+Work that does not arrive by mail can be **pasted**: a CSV export, the notes from a standup, a
+forwarded thread, a photo of a whiteboard. Say what shape you want the cards in and get them.
+See [Pasting things in](#pasting-things-in).
+
+And because every one of those cards exists because somebody is waiting on you, each carries the
+**replies you owe** — drafted by Claude while it still has the message in front of it. One to send
+now, one for when the work is actually done, per person. Tweak them by telling Claude what to
+change, or edit them by hand. See [Draft replies](#the-replies-you-owe).
+
 ```
 ┌──────────────┐        ┌──────────────┐        ┌──────────────┐
 │  React UI    │──HTTP──│  Express API │──┐     │  MCP server  │
@@ -58,6 +67,8 @@ Individually:
 | `bun run tunnel` | Publish the board on its Cloudflare hostname (see below) |
 | `bun run watch:mentions` | Act on `@claude` comments unattended (see below) |
 | `bun run watch:sync` | Run queued Outlook/Teams syncs (see below) |
+| `bun run watch:responses` | Rewrite draft replies you asked Claude to change (see below) |
+| `bun run watch:intake` | Turn what you paste into a board's chat into cards (see below) |
 | `bun run typecheck` | `tsc --noEmit` across all four packages |
 | `bun run db:reset` | Delete the database and re-run migrations |
 | `bun run db:seed` | Add a sample board (skips if it already exists) |
@@ -152,6 +163,8 @@ priority task assigned to you"*.
 | `my_queue` | everything assigned to Claude, most urgent first — the main entry point |
 | `mentions` `mention_claim` `mention_resolve` `mention_release` | the `@claude` inbox (see below) |
 | `sync_state` `sync_pending` `sync_request` `sync_claim` `sync_complete` `sync_cancel` | pulling work in from Outlook and Teams |
+| `responses` `response_draft` `response_pending` `response_claim` `response_complete` `response_request` `response_cancel` | the replies each card owes (see below) |
+| `intake_pending` `intake_claim` `intake_complete` `intake_cancel` | raw material pasted into a board's chat (see below) |
 
 Assignees accept natural aliases, so `"you"`, `"claude"` and `"agent"` all resolve to
 Claude, and `"me"`, `"i"` and `"human"` to you. Columns resolve by id, key or name, so
@@ -298,6 +311,128 @@ If the connector is ever disconnected, a sync queues, attempts, and reports:
 Which is the system working: the watermark stays put, so nothing is skipped once it is reconnected
 and you press Sync again.
 
+## Pasting things in
+
+Work rarely arrives as a task list. It arrives as a CSV somebody exported, the notes from a call, a
+forwarded thread, a photo of a whiteboard. Every board has a **Paste** button for exactly that.
+
+```
+┌─ Make cards from anything ─────────────────────────────┐
+│  you  One card per open row, assign by the owner       │
+│       column, skip anything marked done                │
+│       ▸ Pasted data · 40 rows × 5 columns              │
+│       ▸ whiteboard.png  1.2 MB                         │
+│                                                        │
+│  ✦ Claude · 28 cards                                   │
+│       Made 28 from the open rows. Skipped the 12       │
+│       marked done, and the "TOTAL" row. Three had      │
+│       due dates in October, outside this board's        │
+│       window — left them off rather than moving your    │
+│       deadline.                                        │
+│       [Migrate auth tables] [Smoke-test SSO] [ … ]     │
+└────────────────────────────────────────────────────────┘
+```
+
+Type into it, paste into it, drop files on it. A paste of more than a couple of lines goes into its
+own block rather than the text box, so a 40-row CSV does not bury what you were typing. Screenshots
+off the clipboard land as attachments. The cards it makes come back as chips you can click straight
+through to.
+
+**What it can read:** CSV, TSV, text, Markdown, JSON, YAML, logs, HTML, images and PDFs. Word and
+Excel files are refused **when you drop them**, with the reason — they are zip archives, so nothing
+here can read one, and saying so at the moment you drop it beats a run that fails five minutes later.
+Export to CSV or PDF, or just paste the text.
+
+### Only screenshots ever get file access
+
+The nice property of this feature is where the boundary falls. Text you paste — and text files you
+attach — are decoded **once, at upload**, and travel inside the prompt. So the common case gives the
+spawned run the board and nothing else:
+
+```
+  pasted a CSV        →  mcp__board
+  attached a PNG      →  mcp__board Read      ← for that one run only
+```
+
+The allowlist is computed per message rather than fixed per watcher, so pasting a spreadsheet never
+hands an unattended run file access it has no use for. `INTAKE_WATCH_ALLOW_FILE_READS=false` refuses
+it outright; a run given a screenshot then says it could not open it rather than inventing what it
+said.
+
+Sending **queues**, like everything else here that needs a model — the API process cannot read a CSV
+into tasks. `bun run watch:intake` picks it up within a few seconds; without it, the paste waits
+until Claude next reads the board. The composer locks while one message is in flight, because two
+runs reading the same paste would create the cards twice.
+
+### What it will not do
+
+It will not invent work that was not in what you gave it, and it is told to say what it **skipped**
+— a row already marked done, a totals line, a box on the whiteboard that was not a task. A due date
+outside the board's window is left off and mentioned rather than quietly moved, because the board's
+duration is a deadline and moving it is not Claude's call. And it is given the cards already on the
+board, so a second paste of overlapping material updates or skips rather than duplicating.
+
+## The replies you owe
+
+A synced card is only half the work. Somebody mailed or messaged you, so the card says what you
+have to do — and there is still a message you owe back. Every imported card carries drafts of it.
+
+Two per person, written at the same time because they answer different moments:
+
+```
+  Send now              ▸ Priya Sharma          ▸ Rahul Menon  (Teams)
+                          Re: Q3 audit numbers    Seen it — pulling the Q3
+                          Hi Priya, I have the…   numbers now, should have…
+
+  When it's done        ▸ Priya Sharma
+  (waits for the card     Re: Q3 audit numbers
+   to reach a done       Hi Priya, Q3 numbers…
+   state)
+```
+
+The **Send now** reply is the one that stops a chaser mail: it confirms you have it and says what
+happens next. The **when it's done** reply reports the outcome, and stays dimmed until the card
+actually reaches a done state — at which point it lights up and the card badges itself.
+
+Email and Teams are drafted differently, because they are different. An email has a subject line
+and a sign-off; a Teams reply is one or two sentences with neither. Trying to give a chat message a
+subject is an error, not something quietly dropped.
+
+### Changing one
+
+Click a box and the message opens in a panel over the card, with two ways to change it:
+
+- **Tell Claude.** Type what you want different — "shorter", "push the date to Friday", "drop the
+  last paragraph" — and it rewrites the whole message, changing nothing you did not ask about. The
+  exchange stacks up under the draft, so you can see what you asked and what it did.
+- **Edit it by hand**, for when saying what you want takes longer than typing it. A hand edit is
+  recorded in the same thread, so the history reads as one story about the message.
+
+Asking for a rewrite **queues** it, the same way Sync does and for the same reason — the API process
+has no model access. The composer locks while one is in flight, because two rewrites of one message
+from the same starting text is not something you can untangle afterwards. `bun run watch:responses`
+is what turns a queued ask into new words within a few seconds; without it, the change waits until
+Claude next reads the board.
+
+If a run cannot do what you asked, the draft keeps its current text and the reason appears under
+your instruction. Silence is the one outcome you cannot act on.
+
+### Nothing here sends anything
+
+Worth saying plainly, because it shapes the whole feature. There is no send endpoint, no Microsoft
+Graph write scope anywhere in the repo, and no send tool in any watcher's allowlist. The reply-watcher
+run gets the board MCP server and **nothing else** — no connector, no file access:
+
+```
+mcp__board                    read the card, rewrite the draft
+                              (--strict-mcp-config: that is genuinely all it can see)
+```
+
+**I've sent this** records that *you* sent it, which is why **Copy** sits next to it and why the
+status is terminal — there is no unsending a mail that has left. The value is having the right
+words ready at the moment you need them; an unattended process able to mail your colleagues as you
+is pure downside.
+
 ## Logs
 
 One file per ISO week under `logs/`, e.g. `logs/2026-W34.log`. A long-running process
@@ -322,8 +457,9 @@ packages/
   server/   Express API over core + request logging and error mapping
   mcp/      stdio MCP server over core, with text renderers tuned for an agent to read
   web/      React + Vite + Tailwind v4 UI with hand-rolled shadcn-style components
-scripts/    tunnel + mention watcher — outside the workspace, so they import core by path
-data/       board.db (gitignored)
+scripts/    tunnel + the four watchers (mentions, sync, replies, intake) — outside the
+            workspace, so they import core by relative path
+data/       board.db + intake/ attachments (gitignored)
 logs/       one .log per ISO week (gitignored)
 ```
 

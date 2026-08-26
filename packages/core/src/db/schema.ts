@@ -180,6 +180,163 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_sync_runs_status ON sync_runs (status, created_at);
     `,
   },
+  {
+    version: 4,
+    name: "task_responses",
+    sql: /* sql */ `
+      -- Every synced card exists because somebody mailed or messaged the user, so
+      -- the card is only half the work: the other half is the reply they owe. A
+      -- response is a DRAFT and nothing in this system ever sends one — 'sent' is
+      -- the human recording that they sent it themselves.
+      --
+      -- Two axes make one card's replies distinguishable:
+      --   channel  email needs a subject line, a Teams message must not have one;
+      --   stage    'acknowledge' is the reply to send now, 'completion' the one to
+      --            send once the work is actually done.
+      CREATE TABLE task_responses (
+        id             TEXT PRIMARY KEY,
+        task_id        TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        board_id       TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        channel        TEXT NOT NULL CHECK (channel IN ('email','chat')),
+        stage          TEXT NOT NULL CHECK (stage IN ('acknowledge','completion')),
+        status         TEXT NOT NULL CHECK (status IN ('draft','approved','sent','discarded')),
+        -- Who it goes to. recipient_ref is the machine-usable half (an address or
+        -- a chat id); recipient_name is what the UI shows.
+        recipient_name TEXT NOT NULL,
+        recipient_ref  TEXT,
+        -- JSON array of additional addresses. Email only.
+        cc             TEXT,
+        -- Email only; NULL for chat, enforced in core so both transports agree.
+        subject        TEXT,
+        body           TEXT NOT NULL,
+        source         TEXT NOT NULL CHECK (source IN ('outlook','teams','manual')),
+        -- The message being replied to, e.g. "outlook:AAMk...". Provenance only:
+        -- uniqueness is the slot index below, not this.
+        source_ref     TEXT,
+        created_by     TEXT NOT NULL REFERENCES users(id),
+        actor_source   TEXT NOT NULL CHECK (actor_source IN ('web','mcp','system')),
+        -- Bumped by every rewrite, so the UI can tell a draft changed under it.
+        revision       INTEGER NOT NULL DEFAULT 1,
+        sent_at        TEXT,
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL
+      );
+
+      -- One live draft per person per stage, so re-running a draft pass over the
+      -- same card is a conflict naming the existing draft rather than a second
+      -- copy of the same reply — the same rule tasks.source_ref gives imports.
+      -- Discarded drafts drop out of the index so a slot can be redrafted.
+      CREATE UNIQUE INDEX idx_responses_slot
+        ON task_responses (task_id, channel, recipient_ref, stage)
+        WHERE recipient_ref IS NOT NULL AND status != 'discarded';
+
+      CREATE INDEX idx_responses_task  ON task_responses (task_id, stage, created_at);
+      CREATE INDEX idx_responses_board ON task_responses (board_id, status);
+
+      -- The queue and the chat transcript are the same table, because they are the
+      -- same thing: one turn is "the human asked for a change" plus "what Claude
+      -- did about it" plus "what the draft became". A pending turn is work; a
+      -- finished one is a message in the thread the user reads.
+      --
+      -- The Express process cannot ask Claude anything — it has no model access —
+      -- so a revision is queued here exactly as a sync is, and an agent run picks
+      -- it up. kind = 'edit' is the exception: a manual edit is inserted already
+      -- done, so the thread reads as one history rather than two.
+      CREATE TABLE response_turns (
+        id             TEXT PRIMARY KEY,
+        -- NULL only for a card-level 'draft' request, which has no draft yet.
+        response_id    TEXT REFERENCES task_responses(id) ON DELETE CASCADE,
+        task_id        TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        board_id       TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        kind           TEXT NOT NULL CHECK (kind IN ('draft','revise','edit')),
+        -- What was asked for, in the user's words. For 'edit', what they changed.
+        instruction    TEXT NOT NULL,
+        status         TEXT NOT NULL CHECK (status IN ('pending','claimed','done','failed','cancelled')),
+        requested_by   TEXT NOT NULL REFERENCES users(id),
+        actor_source   TEXT NOT NULL CHECK (actor_source IN ('web','mcp','system')),
+        -- Spawns already made for this turn, so a watcher can give up and say so.
+        attempts       INTEGER NOT NULL DEFAULT 0,
+        -- Claude's side of the exchange, or the reason it failed.
+        note           TEXT,
+        -- What the draft became. Kept per turn so the thread is auditable after
+        -- the next rewrite has overwritten the draft itself.
+        result_subject TEXT,
+        result_body    TEXT,
+        claimed_at     TEXT,
+        finished_at    TEXT,
+        created_at     TEXT NOT NULL,
+        -- A draft request produces responses, so it cannot name one; a revise or
+        -- an edit acts on exactly one.
+        CHECK ((kind = 'draft') = (response_id IS NULL))
+      );
+
+      CREATE INDEX idx_turns_queue    ON response_turns (status, created_at);
+      CREATE INDEX idx_turns_response ON response_turns (response_id, created_at);
+      CREATE INDEX idx_turns_task     ON response_turns (task_id, created_at);
+    `,
+  },
+  {
+    version: 5,
+    name: "board_intake",
+    sql: /* sql */ `
+      -- A chat on the board for turning raw material into cards: a pasted CSV, a
+      -- meeting note, an email thread, a screenshot of somebody's plan.
+      --
+      -- Same shape as response_turns, for the same reason: the queue and the
+      -- transcript are one table. A 'pending' row is work waiting for an agent
+      -- run; a finished one is a message in the conversation the user scrolls.
+      -- The Express process has no model access, so pasting is all it can do.
+      CREATE TABLE intake_messages (
+        id            TEXT PRIMARY KEY,
+        board_id      TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        -- What the user typed alongside what they pasted. May be blank when the
+        -- pasted material speaks for itself.
+        instruction   TEXT NOT NULL,
+        -- Pasted text, verbatim. Newlines and column alignment are the content
+        -- when the content is a CSV, so nothing is normalised out of it.
+        content       TEXT,
+        status        TEXT NOT NULL CHECK (status IN ('pending','claimed','done','failed','cancelled')),
+        requested_by  TEXT NOT NULL REFERENCES users(id),
+        actor_source  TEXT NOT NULL CHECK (actor_source IN ('web','mcp','system')),
+        -- Spawns already made, so a watcher can give up and say so.
+        attempts      INTEGER NOT NULL DEFAULT 0,
+        -- Claude's reply in the chat, or the reason nothing happened.
+        note          TEXT,
+        -- JSON array of task ids created, so the reply can link the cards it made
+        -- rather than describing them and leaving the user to go and find them.
+        created_tasks TEXT,
+        claimed_at    TEXT,
+        finished_at   TEXT,
+        created_at    TEXT NOT NULL
+      );
+
+      CREATE INDEX idx_intake_board ON intake_messages (board_id, created_at);
+      CREATE INDEX idx_intake_queue ON intake_messages (status, created_at);
+
+      -- One pasted or dropped file. Text-bearing kinds are decoded once, here, at
+      -- upload: the extracted text travels in the prompt, so a pasted CSV needs no
+      -- file access from the run at all. Only an image or a PDF leaves the run
+      -- something it has to open, and that is what decides its tool allowlist.
+      CREATE TABLE intake_attachments (
+        id          TEXT PRIMARY KEY,
+        message_id  TEXT NOT NULL REFERENCES intake_messages(id) ON DELETE CASCADE,
+        board_id    TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        filename    TEXT NOT NULL,
+        mime        TEXT NOT NULL,
+        -- 'text' is inlined into the prompt; 'image' and 'pdf' are read from disk.
+        kind        TEXT NOT NULL CHECK (kind IN ('text','image','pdf')),
+        bytes       INTEGER NOT NULL,
+        -- Relative to INTAKE_DIR, never absolute: an absolute path baked into a row
+        -- breaks the moment the repo moves.
+        path        TEXT NOT NULL,
+        -- Decoded contents for kind='text'. NULL for the binary kinds.
+        text        TEXT,
+        created_at  TEXT NOT NULL
+      );
+
+      CREATE INDEX idx_intake_files ON intake_attachments (message_id, created_at);
+    `,
+  },
 ];
 
 /** Assignees exist before any board does, so both transports can reference them. */

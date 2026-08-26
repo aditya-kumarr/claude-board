@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { AlertTriangle, Check, Inbox, Loader2, RefreshCw, Terminal, X } from "lucide-react";
+import { AlertTriangle, Check, CircleDashed, Inbox, Loader2, RefreshCw, Terminal, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Hint } from "@/components/ui/tooltip";
 import { relativeTime } from "@/lib/format";
@@ -12,6 +12,24 @@ import { cn } from "@/lib/utils";
  * normal queue-then-claim never trips it.
  */
 const STALE_AFTER_MS = 20_000;
+
+/**
+ * Per-source watermarks mean a run can half-succeed: Outlook read in full while
+ * a throttled Teams scan is left to re-read. The run's own status is `failed` in
+ * that case — correctly, since the window was not finished — but showing it as a
+ * flat failure hides cards that did land and reads as "nothing happened".
+ */
+function outcome(sync: BoardSyncSummary): "ok" | "partial" | "failed" | null {
+  const run = sync.lastRun;
+  if (!run || run.status === "cancelled") return null;
+  if (run.status === "ok") return "ok";
+  // Partial needs something actually left over to name. Without this guard a run
+  // whose sources all read ok rendered as "Imported 0,  unfinished".
+  const incomplete = sync.sources.filter((state) => state.lastStatus === "failed");
+  if (incomplete.length === 0) return run.imported > 0 ? "ok" : "failed";
+  const banked = run.imported > 0 || sync.sources.some((state) => state.lastStatus === "ok");
+  return banked ? "partial" : "failed";
+}
 
 export interface SyncButtonProps {
   sync: BoardSyncSummary;
@@ -56,19 +74,26 @@ export function SyncButton({ sync, disabled, pressing, now, onSync, onCancel }: 
           state.syncedThrough ? `read through ${relativeTime(state.syncedThrough)}` : "never synced"
         }`,
     );
-    if (lastRun?.status === "failed") lines.push(`Last run failed — ${lastRun.detail ?? "no reason recorded"}`);
-    else if (lastRun?.status === "ok") {
-      lines.push(
-        `Last run ${relativeTime(lastRun.finishedAt ?? lastRun.createdAt)}: ${
-          lastRun.imported > 0 ? `${lastRun.imported} task(s) imported` : "nothing new"
-        }`,
-      );
+    if (lastRun) {
+      const when = relativeTime(lastRun.finishedAt ?? lastRun.createdAt);
+      const incomplete = sources.filter((state) => state.lastStatus === "failed").map((state) => SYNC_SOURCE_LABELS[state.source]);
+      if (lastRun.status === "ok") {
+        lines.push(`Last run ${when}: ${lastRun.imported > 0 ? `${lastRun.imported} task(s) imported` : "nothing new"}`);
+      } else if (lastRun.status === "failed") {
+        lines.push(
+          lastRun.imported > 0 || incomplete.length < sources.length
+            ? `Last run ${when} was partial: ${lastRun.imported} imported, ${incomplete.join(" and ")} not finished`
+            : `Last run failed ${when} — ${lastRun.detail ?? "no reason recorded"}`,
+        );
+      }
     }
     lines.push("Reads only what arrived since the last successful sync.");
     return lines.join("\n");
   }, [activeRun, lastRun, sources]);
 
-  const failed = !running && lastRun?.status === "failed";
+  const result = outcome(sync);
+  // Only a run that achieved nothing marks the button itself as a problem.
+  const failed = !running && result === "failed";
   const neverSynced = !running && sources.every((state) => state.syncedThrough === null);
 
   return (
@@ -131,6 +156,7 @@ export function SyncButton({ sync, disabled, pressing, now, onSync, onCancel }: 
  */
 export function SyncResult({ sync, now }: { sync: BoardSyncSummary; now: number }) {
   const { activeRun, lastRun } = sync;
+  const result = outcome(sync);
 
   // A tooltip nobody hovers is not an explanation. If a request has been sitting
   // unclaimed, say so in the open, and say exactly what to run.
@@ -148,24 +174,38 @@ export function SyncResult({ sync, now }: { sync: BoardSyncSummary; now: number 
     );
   }
 
-  if (activeRun || !lastRun || lastRun.status === "cancelled") return null;
+  if (activeRun || !lastRun || result === null) return null;
 
-  const ok = lastRun.status === "ok";
+  const incomplete = sync.sources
+    .filter((state) => state.lastStatus === "failed")
+    .map((state) => SYNC_SOURCE_LABELS[state.source]);
+
+  const tone =
+    result === "ok" ? "var(--muted-foreground)" : result === "partial" ? "var(--kind-review)" : "var(--destructive)";
+  const headline =
+    result === "failed"
+      ? "Sync failed"
+      : result === "partial"
+        ? `Imported ${lastRun.imported}, ${incomplete.join(" and ")} unfinished`
+        : lastRun.imported > 0
+          ? `Imported ${lastRun.imported}`
+          : "Nothing new";
+
   return (
-    <p
-      className="flex items-start gap-1.5 px-4 pb-2 text-[11.5px] leading-relaxed sm:px-6"
-      style={{ color: ok ? "var(--muted-foreground)" : "var(--destructive)" }}
-    >
-      {ok ? (
+    <p className="flex items-start gap-1.5 px-4 pb-2 text-[11.5px] leading-relaxed sm:px-6" style={{ color: tone }}>
+      {result === "ok" ? (
         <Check className="mt-px size-3 shrink-0" style={{ color: "var(--kind-done)" }} />
+      ) : result === "partial" ? (
+        <CircleDashed className="mt-px size-3 shrink-0" />
       ) : (
         <AlertTriangle className="mt-px size-3 shrink-0" />
       )}
       <span className="min-w-0">
-        <span className="font-medium">
-          {ok ? (lastRun.imported > 0 ? `Imported ${lastRun.imported}` : "Nothing new") : "Sync failed"}
-        </span>
-        {lastRun.detail ? <span> · {lastRun.detail}</span> : null}
+        <span className="font-medium">{headline}</span>
+        {result === "partial" ? (
+          <span className="text-muted-foreground"> — press Sync again to finish the rest; nothing was lost.</span>
+        ) : null}
+        {lastRun.detail ? <span className="text-muted-foreground"> · {lastRun.detail}</span> : null}
         <span className="text-muted-foreground"> · {relativeTime(lastRun.finishedAt ?? lastRun.createdAt)}</span>
       </span>
     </p>

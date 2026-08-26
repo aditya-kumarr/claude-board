@@ -69,6 +69,12 @@ const ALLOWED_TOOLS =
   process.env.SYNC_WATCH_ALLOWED_TOOLS?.trim() ||
   ["mcp__board", ...MS365_READ_TOOLS.map((tool) => `${MS365_PREFIX}__${tool}`)].join(" ");
 const EXTRA_ARGS = argsFromEnv(process.env.SYNC_WATCH_CLAUDE_ARGS);
+/**
+ * Quiet period after a run reports throttling, before another is dispatched.
+ * Graph's limits are per-mailbox, so following a 429 immediately with a fresh run
+ * spends the next window's budget on the same wall.
+ */
+const THROTTLE_COOLDOWN_MS = Number(process.env.SYNC_WATCH_THROTTLE_COOLDOWN_MS ?? 180_000);
 
 /** The watcher's own writes are automation, not the model speaking. */
 const watcher: ActorContext = { actorId: USER_CLAUDE, source: "system" };
@@ -91,24 +97,45 @@ function buildPrompt(run: SyncRunWithContext): string {
     "Then read the sources with the Microsoft 365 tools you have — outlook_email_search for mail,",
     "teams_list_chats and chat_message_search for Teams — restricting each to the window above.",
     "Create a card per genuine outstanding item with task_create (always passing sourceRef so a",
-    `repeat sync cannot duplicate it), and finish with sync_complete ${run.id}.`,
+    "repeat sync cannot duplicate it).",
     "",
-    "You have read tools only. If something looks like it needs a reply sent, that is a task for the",
-    "user, not something for you to send.",
+    "Then, for each card you create, draft the reply the user owes with response_draft — two per",
+    "person who needs an answer: stage=acknowledge to send now, stage=completion to send once the",
+    "work is done. Do it in this run and not later: you have the message in front of you now, and",
+    "after this run ends nobody does. sync_claim spells out the rules.",
+    "",
+    `Finish with sync_complete ${run.id}.`,
+    "",
+    "You have read tools only, and drafting is not sending: a draft sits on the board for the user to",
+    "read, edit and send themselves. Nothing here can send mail or post to Teams, by design.",
     "",
     "Rules for finishing, which matter more than how much you import:",
     "  - Report status=ok only if you actually read the whole window. Reporting ok advances the",
     "    board's watermark, so a premature ok silently loses everything you did not read.",
     "  - If the Microsoft 365 tools error or report no access, complete the run with status=failed",
     "    and say exactly what they said. Do not try to authenticate — nobody is here to help.",
-    "  - Microsoft Graph throttles (HTTP 429). Wait out one retryAfterSeconds; if it throttles again,",
-    "    stop and complete with status=failed rather than grinding. The watermark stays put, so a",
-    "    later retry loses nothing, whereas a partial read reported as ok loses the unread remainder.",
+    "  - Microsoft Graph throttles (HTTP 429). You CANNOT wait it out: you have no timer, no sleep and no",
+    "    shell. Saying you will retry shortly just ends this run with the request still open, which the",
+    "    user sees as a failure having banked nothing. Call sync_complete straight away with sourceStatus",
+    "    instead — the throttled source failed, anything you finished ok. The ok half keeps its progress",
+    "    and only the failed half is re-read.",
     "  - Complete the run even if you import nothing. An unfinished run leaves the board showing a",
     "    sync that never ends.",
     "  - You are unattended: there is no one to ask. When an item is genuinely ambiguous, skip it and",
     "    name it in the detail so the user can judge for themselves.",
   ].join("\n");
+}
+
+/** Reads like a rate limit rather than a real failure. */
+const throttled = (text: string): boolean => /429|throttl|rate.?limit|too many requests/i.test(text);
+
+/** Earliest time another run may be dispatched. */
+let dispatchAfter = 0;
+
+function holdOff(): void {
+  dispatchAfter = Date.now() + THROTTLE_COOLDOWN_MS;
+  log.warn("throttled by Microsoft Graph; holding off", { seconds: Math.round(THROTTLE_COOLDOWN_MS / 1000) });
+  say(`  … throttled by Microsoft Graph — waiting ${Math.round(THROTTLE_COOLDOWN_MS / 1000)}s before the next run`);
 }
 
 /** Runs one queued sync and makes sure it cannot be left spinning. */
@@ -133,8 +160,23 @@ async function handle(run: SyncRunWithContext, mcpConfig: string): Promise<void>
   // zero exit code with the request still open is still a failure.
   const after = getSyncRun(run.id);
   if (after.status === "ok" || after.status === "failed") {
-    log.info("sync handled", { runId: run.id, status: after.status, imported: after.imported, seconds: result.seconds });
-    say(`  ${after.status === "ok" ? "✓" : "✗"} ${after.status} in ${result.seconds}s — ${after.detail ?? ""}`);
+    // "failed" with cards imported is a partial, not a washout: per-source
+    // completion means some watermarks moved. Say so, or the operator reads a
+    // red line and assumes nothing happened.
+    const partial = after.status === "failed" && after.imported > 0;
+    log.info("sync handled", {
+      runId: run.id,
+      status: after.status,
+      partial,
+      imported: after.imported,
+      seconds: result.seconds,
+    });
+    say(
+      `  ${after.status === "ok" ? "✓" : partial ? "◐" : "✗"} ${
+        partial ? `partial (${after.imported} imported)` : after.status
+      } in ${result.seconds}s — ${after.detail ?? ""}`,
+    );
+    if (throttled(after.detail ?? "")) holdOff();
     return;
   }
 
@@ -158,6 +200,7 @@ async function handle(run: SyncRunWithContext, mcpConfig: string): Promise<void>
   }
   log.warn("sync run ended without completing", { runId: run.id, seconds: result.seconds, summary: result.summary });
   say(`  ✗ did not finish; marked failed, watermark unchanged`);
+  if (throttled(result.summary) || throttled(detail)) holdOff();
 }
 
 // --- main loop ---------------------------------------------------------------
@@ -175,6 +218,7 @@ say(`  allowed tools : ${ALLOWED_TOOLS}`);
 say(`  mcp config    : ${mcpConfig} (board pinned; merged with your own config, not strict)`);
 say(`  microsoft 365 : your claude.ai connector, read tools only`);
 say(`  poll / timeout: ${INTERVAL_MS}ms / ${Math.round(TIMEOUT_MS / 1000)}s per run`);
+say(`  throttle hold : ${Math.round(THROTTLE_COOLDOWN_MS / 1000)}s after Graph reports a rate limit`);
 say(`  mode          : ${DRY_RUN ? "DRY RUN — nothing is spawned" : ONCE ? "one pass" : "watching"}`);
 say("");
 say("  Runs here read your mail and Teams messages. They cannot send mail, post to Teams,");
@@ -182,9 +226,10 @@ say("  or touch the filesystem.");
 say("");
 
 async function pass(): Promise<void> {
+  if (Date.now() < dispatchAfter) return;
   const pending = listSyncRuns({ status: "pending", oldestFirst: true, limit: 20 });
   for (const run of pending) {
-    if (stopping) return;
+    if (stopping || Date.now() < dispatchAfter) return;
     if (inFlight.has(run.id)) continue;
 
     if (DRY_RUN) {

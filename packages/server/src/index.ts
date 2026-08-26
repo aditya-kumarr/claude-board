@@ -7,6 +7,8 @@ import { requestLogging } from "./middleware/logging.ts";
 import { errorHandler, notFoundHandler } from "./middleware/errors.ts";
 import { boardsRouter } from "./routes/boards.ts";
 import { tasksRouter } from "./routes/tasks.ts";
+import { responsesRouter } from "./routes/responses.ts";
+import { intakeMessagesRouter } from "./routes/intake.ts";
 import { metaRouter } from "./routes/meta.ts";
 
 const log = createLogger("server");
@@ -27,6 +29,8 @@ export function createApp(): express.Express {
   app.use("/api", metaRouter);
   app.use("/api/boards", boardsRouter);
   app.use("/api/tasks", tasksRouter);
+  app.use("/api/responses", responsesRouter);
+  app.use("/api/intake", intakeMessagesRouter);
 
   // Serve the built SPA when it exists, so `bun run build` gives a single-port app.
   const webDist = join(REPO_ROOT, "packages/web/dist");

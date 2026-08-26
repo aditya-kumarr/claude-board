@@ -11,3 +11,6 @@ logs/*.jsonl
 cloudflared/config.generated.yml
 data/mention-watch.mcp.json
 data/sync-watch.mcp.json
+data/response-watch.mcp.json
+data/intake-watch.mcp.json
+data/intake/
