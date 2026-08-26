@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Hint } from "@/components/ui/tooltip";
+import { SyncButton, SyncResult } from "@/components/sync-button";
 import { formatDateTime, progressPercent, remainingLabel, urgencyColor } from "@/lib/format";
 import { DURATION_LABELS, kindColor, type BoardDetail } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -27,6 +28,9 @@ export function BoardHeader({
   onAddColumn,
   onArchive,
   onDelete,
+  onSync,
+  onCancelSync,
+  syncing,
 }: {
   detail: BoardDetail;
   now: number;
@@ -34,6 +38,10 @@ export function BoardHeader({
   onAddColumn: () => void;
   onArchive: () => void;
   onDelete: () => void;
+  onSync: () => void;
+  onCancelSync: () => void;
+  /** True while the queue request itself is in flight. */
+  syncing: boolean;
 }) {
   const { board, window: boardWindow, stats } = detail;
   const percent = progressPercent(boardWindow, now);
@@ -60,6 +68,14 @@ export function BoardHeader({
         </div>
 
         <div className="flex items-center gap-2">
+          <SyncButton
+            sync={detail.sync}
+            disabled={board.archived}
+            pressing={syncing}
+            now={now}
+            onSync={onSync}
+            onCancel={onCancelSync}
+          />
           <Button size="sm" onClick={onAddTask}>
             <Plus /> New task
           </Button>
@@ -126,6 +142,8 @@ export function BoardHeader({
           </Badge>
         </div>
       </div>
+
+      <SyncResult sync={detail.sync} now={now} />
     </header>
   );
 }

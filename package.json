@@ -17,7 +17,8 @@
     "typecheck": "bun x tsc --noEmit -p packages/core && bun x tsc --noEmit -p packages/server && bun x tsc --noEmit -p packages/mcp && bun x tsc --noEmit -p packages/web",
     "db:reset": "rm -f data/board.db data/board.db-wal data/board.db-shm && bun run --cwd packages/server migrate",
     "db:seed": "bun run --cwd packages/server seed",
-    "watch:mentions": "bun scripts/watch-mentions.ts"
+    "watch:mentions": "bun scripts/watch-mentions.ts",
+    "watch:sync": "bun scripts/watch-sync.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.2",

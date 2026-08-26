@@ -2,12 +2,15 @@ import type {
   ActivityEntry,
   BoardColumn,
   BoardDetail,
+  BoardSyncSummary,
   ColumnKind,
   DurationKind,
   Mention,
   MentionStatus,
   MentionWithContext,
   Priority,
+  SyncRun,
+  SyncSource,
   Task,
   TaskComment,
   TaskDetail,
@@ -89,6 +92,22 @@ export const api = {
     request<{ id: string; deletedTasks: number }>(`/boards/${boardId}`, { method: "DELETE" }),
   boardActivity: (boardId: string, limit = 40) =>
     request<{ activity: ActivityEntry[] }>(`/boards/${boardId}/activity?limit=${limit}`),
+
+  /**
+   * Queues a sync — it does not perform one. The API cannot reach Microsoft
+   * Graph; an agent run picks the request up. `alreadyQueued` means a request was
+   * outstanding and this call returned that one instead of stacking a second.
+   */
+  requestSync: (boardId: string, payload: { sources?: SyncSource[]; since?: string; lookbackDays?: number } = {}) =>
+    request<{ run: SyncRun; alreadyQueued: boolean }>(`/boards/${boardId}/sync`, {
+      method: "POST",
+      ...body(payload),
+    }),
+  /** Drops the outstanding request, so a queue nothing is listening to can be cleared. */
+  cancelSync: (boardId: string, reason?: string) =>
+    request<SyncRun>(`/boards/${boardId}/sync`, { method: "DELETE", ...body({ reason }) }),
+  syncState: (boardId: string, limit = 10) =>
+    request<BoardSyncSummary & { runs: SyncRun[] }>(`/boards/${boardId}/sync?limit=${limit}`),
 
   addColumn: (boardId: string, payload: { name: string; kind?: ColumnKind; position?: number; wipLimit?: number | null }) =>
     request<BoardColumn>(`/boards/${boardId}/columns`, { method: "POST", ...body(payload) }),

@@ -11,17 +11,14 @@
  * is what decides who can queue work here; this script is downstream of that
  * decision and trusts it. Two things keep the blast radius small:
  *
- *   - the spawned run sees ONLY the board MCP server (a generated config, not the
- *     repo's .mcp.json) plus read-only file tools, so it can move a card and read
- *     the codebase but cannot mail anyone or edit files, and
+ *   - the spawned run sees ONLY the board MCP server (see scripts/lib/claude-run.ts)
+ *     plus read-only file tools, so it can move a card and read the codebase but
+ *     cannot mail anyone or edit files, and
  *   - it starts from now: requests already sitting in the queue are left alone
  *     unless you pass --backlog.
  *
  * Widen MENTION_WATCH_ALLOWED_TOOLS deliberately, not by default.
  */
-import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 // Relative, not "@automation/core": scripts/ sits outside the bun workspace, so
 // the package alias is not resolvable here. Same reason `bun run typecheck` does
 // not cover this file — see the note in README.
@@ -32,11 +29,11 @@ import {
   listMentions,
   releaseMention,
   resolveMention,
-  REPO_ROOT,
   USER_CLAUDE,
   type ActorContext,
   type MentionWithContext,
 } from "../packages/core/src/index.ts";
+import { argsFromEnv, boardServer, killActiveRuns, runClaude, writeMcpConfig } from "./lib/claude-run.ts";
 
 const log = createLogger("mention-watch");
 
@@ -50,7 +47,7 @@ const CLAUDE_BIN = process.env.MENTION_WATCH_CLAUDE_BIN?.trim() || "claude";
 const MODEL = process.env.MENTION_WATCH_MODEL?.trim() || "";
 /** Read-only outside the board on purpose — see the header. */
 const ALLOWED_TOOLS = process.env.MENTION_WATCH_ALLOWED_TOOLS?.trim() || "mcp__board Read Grep Glob";
-const EXTRA_ARGS = (process.env.MENTION_WATCH_CLAUDE_ARGS?.trim() || "").split(/\s+/).filter(Boolean);
+const EXTRA_ARGS = argsFromEnv(process.env.MENTION_WATCH_CLAUDE_ARGS);
 /** Spawns per request before giving up and telling the human in the thread. */
 const MAX_ATTEMPTS = Math.max(Number(process.env.MENTION_WATCH_MAX_ATTEMPTS ?? 2), 1);
 
@@ -58,36 +55,6 @@ const MAX_ATTEMPTS = Math.max(Number(process.env.MENTION_WATCH_MAX_ATTEMPTS ?? 2
 const watcher: ActorContext = { actorId: USER_CLAUDE, source: "system" };
 
 const say = (message: string) => process.stderr.write(`${message}\n`);
-
-/**
- * A config holding just the board server. The repo's .mcp.json also carries an
- * unrelated Microsoft 365 server, and an unattended run triggered by a web form
- * has no business being able to send mail.
- */
-function writeMcpConfig(): string {
-  const path = join(REPO_ROOT, "data/mention-watch.mcp.json");
-  mkdirSync(dirname(path), { recursive: true });
-  // The paths are pinned rather than inherited: the spawned server has to open
-  // the same database this watcher is reading, or it will answer requests on a
-  // different board than the one they were left on.
-  const env: Record<string, string> = { LOG_LEVEL: process.env.LOG_LEVEL ?? "info" };
-  if (process.env.AUTOMATION_DB_PATH) env.AUTOMATION_DB_PATH = process.env.AUTOMATION_DB_PATH;
-  if (process.env.AUTOMATION_LOG_DIR) env.AUTOMATION_LOG_DIR = process.env.AUTOMATION_LOG_DIR;
-
-  writeFileSync(
-    path,
-    `${JSON.stringify(
-      {
-        mcpServers: {
-          board: { command: "bun", args: ["run", join(REPO_ROOT, "packages/mcp/src/index.ts")], env },
-        },
-      },
-      null,
-      2,
-    )}\n`,
-  );
-  return path;
-}
 
 function buildPrompt(mention: MentionWithContext): string {
   return [
@@ -115,71 +82,6 @@ function buildPrompt(mention: MentionWithContext): string {
   ].join("\n");
 }
 
-interface RunResult {
-  ok: boolean;
-  /** Claude's final message, or the reason there isn't one. */
-  summary: string;
-}
-
-function runClaude(mention: MentionWithContext, mcpConfig: string): Promise<RunResult> {
-  const args = [
-    "-p",
-    buildPrompt(mention),
-    "--output-format",
-    "json",
-    "--mcp-config",
-    mcpConfig,
-    // Without this the repo's own .mcp.json is merged in as well.
-    "--strict-mcp-config",
-    "--allowedTools",
-    ALLOWED_TOOLS,
-    ...(MODEL ? ["--model", MODEL] : []),
-    ...EXTRA_ARGS,
-  ];
-
-  return new Promise((resolve) => {
-    const child = spawn(CLAUDE_BIN, args, {
-      cwd: REPO_ROOT,
-      // stdin closed: an unattended run must never block waiting on input.
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env },
-    });
-
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-
-    const timer = setTimeout(() => {
-      log.error("run timed out", { mentionId: mention.id, timeoutMs: TIMEOUT_MS });
-      child.kill("SIGKILL");
-    }, TIMEOUT_MS);
-    timer.unref();
-
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      resolve({ ok: false, summary: `could not start ${CLAUDE_BIN}: ${error.message}` });
-    });
-
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      let summary = "";
-      try {
-        const payload = JSON.parse(stdout) as { result?: unknown; is_error?: boolean };
-        if (typeof payload.result === "string") summary = payload.result.trim();
-      } catch {
-        // Not JSON — a crash or a usage error. The tail of stderr says more.
-        summary = stderr.trim().split("\n").slice(-3).join(" ").slice(0, 500);
-      }
-      const ok = code === 0 && signal === null;
-      resolve({
-        ok,
-        summary: summary || (ok ? "(the run produced no final message)" : `exited ${code ?? signal}`),
-      });
-    });
-  });
-}
-
 /** Spawns a run for one request and makes sure it does not end up in limbo. */
 async function handle(mention: MentionWithContext, mcpConfig: string, attempt: number): Promise<void> {
   log.info("dispatching request", {
@@ -190,9 +92,16 @@ async function handle(mention: MentionWithContext, mcpConfig: string, attempt: n
   });
   say(`→ ${mention.id}  ${mention.request.slice(0, 90)}`);
 
-  const started = Date.now();
-  const result = await runClaude(mention, mcpConfig);
-  const seconds = Math.round((Date.now() - started) / 1000);
+  const result = await runClaude({
+    prompt: buildPrompt(mention),
+    mcpConfig,
+    allowedTools: ALLOWED_TOOLS,
+    timeoutMs: TIMEOUT_MS,
+    bin: CLAUDE_BIN,
+    model: MODEL,
+    extraArgs: EXTRA_ARGS,
+  });
+  const { seconds } = result;
 
   // The run was told to resolve the request itself. Whether it did is the real
   // outcome — a zero exit code with the request still open is still a failure.
@@ -230,7 +139,7 @@ async function handle(mention: MentionWithContext, mcpConfig: string, attempt: n
 
 getDb(); // migrate before the first poll, and fail fast on a broken database
 
-const mcpConfig = writeMcpConfig();
+const mcpConfig = writeMcpConfig("mention-watch.mcp.json", { board: boardServer() });
 /** Requests older than startup are somebody else's business unless asked for. */
 const startedAt = new Date().toISOString();
 const attempts = new Map<string, number>();
@@ -285,6 +194,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     stopping = true;
     log.info("mention watcher stopping", { signal });
+    // Each run lives in its own process group, so it does not get the terminal's
+    // Ctrl-C for free — take it down explicitly rather than orphaning it.
+    killActiveRuns();
     say("\nstopped.");
     process.exit(0);
   });

@@ -11,6 +11,7 @@ export * from "./services/boards.ts";
 export * from "./services/columns.ts";
 export * from "./services/comments.ts";
 export * from "./services/mentions.ts";
+export * from "./services/sync.ts";
 export * from "./services/tasks.ts";
 export * from "./services/users.ts";
 export * from "./services/activity.ts";

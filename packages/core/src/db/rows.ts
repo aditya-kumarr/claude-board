@@ -4,9 +4,14 @@ import type {
   BoardColumn,
   ColumnKind,
   DurationKind,
+  BoardSyncState,
   Mention,
   MentionStatus,
   Priority,
+  SyncRun,
+  SyncScopeEntry,
+  SyncSource,
+  SyncStatus,
   Task,
   TaskComment,
   User,
@@ -54,6 +59,7 @@ export interface TaskRow {
   position: number;
   completed_at: string | null;
   blocked_reason: string | null;
+  source_ref: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -76,6 +82,31 @@ export interface MentionRow {
   claimed_at: string | null;
   resolved_at: string | null;
   resolution: string | null;
+  created_at: string;
+}
+export interface SyncStateRow {
+  board_id: string;
+  source: string;
+  synced_through: string | null;
+  last_run_at: string | null;
+  last_status: string | null;
+  last_detail: string | null;
+  imported: number;
+  updated_at: string;
+}
+export interface SyncRunRow {
+  id: string;
+  board_id: string;
+  scope: string;
+  status: string;
+  requested_by: string;
+  actor_source: string;
+  since: string;
+  cutoff: string;
+  imported: number;
+  detail: string | null;
+  started_at: string | null;
+  finished_at: string | null;
   created_at: string;
 }
 export interface ActivityRow {
@@ -132,6 +163,7 @@ export const toTask = (row: TaskRow): Task => ({
   position: row.position,
   completedAt: row.completed_at,
   blockedReason: row.blocked_reason,
+  sourceRef: row.source_ref,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
@@ -158,6 +190,44 @@ export const toMention = (row: MentionRow): Mention => ({
   resolution: row.resolution,
   createdAt: row.created_at,
 });
+
+export const toSyncState = (row: SyncStateRow): BoardSyncState => ({
+  boardId: row.board_id,
+  source: row.source as SyncSource,
+  syncedThrough: row.synced_through,
+  lastRunAt: row.last_run_at,
+  lastStatus: row.last_status as "ok" | "failed" | null,
+  lastDetail: row.last_detail,
+  imported: row.imported,
+  updatedAt: row.updated_at,
+});
+
+export function toSyncRun(row: SyncRunRow): SyncRun {
+  let scope: SyncScopeEntry[] = [];
+  try {
+    const parsed = JSON.parse(row.scope) as SyncScopeEntry[];
+    if (Array.isArray(parsed)) scope = parsed;
+  } catch {
+    // A malformed scope must not make the run unreadable — the status and the
+    // window still tell the operator what happened.
+    scope = [];
+  }
+  return {
+    id: row.id,
+    boardId: row.board_id,
+    scope,
+    status: row.status as SyncStatus,
+    requestedBy: row.requested_by,
+    actorSource: row.actor_source as ActorSource,
+    since: row.since,
+    cutoff: row.cutoff,
+    imported: row.imported,
+    detail: row.detail,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    createdAt: row.created_at,
+  };
+}
 
 export function toActivity(row: ActivityRow): ActivityEntry {
   let detail: Record<string, unknown> | null = null;

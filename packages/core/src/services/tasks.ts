@@ -66,6 +66,12 @@ export interface CreateTaskInput {
   /** Must fall within the board's window; defaults to the board deadline. */
   dueAt?: string | null;
   blockedReason?: string | null;
+  /**
+   * Natural key of what this card was imported from, e.g. `outlook:AAMkAD...`.
+   * Unique per board: importing the same message twice is rejected as a conflict
+   * rather than producing a second card, which is what makes a sync re-runnable.
+   */
+  sourceRef?: string | null;
 }
 
 export function createTask(boardId: string, input: CreateTaskInput, actor: ActorContext): Task {
@@ -95,13 +101,32 @@ export function createTask(boardId: string, input: CreateTaskInput, actor: Actor
 
   assertWipLimit(column.id);
 
+  const sourceRef = input.sourceRef?.trim() || null;
+  if (sourceRef) {
+    if (sourceRef.length > 400) throw badRequest("sourceRef must be 400 characters or fewer");
+    const existing = getDb()
+      .query<{ id: string; title: string }, [string, string]>(
+        "SELECT id, title FROM tasks WHERE board_id = ? AND source_ref = ?",
+      )
+      .get(boardId, sourceRef);
+    // Checked up front so the caller gets the existing card's id, which a bare
+    // UNIQUE violation would not tell them.
+    if (existing) {
+      throw conflict(`this board already has a task imported from ${sourceRef}`, {
+        sourceRef,
+        existingTaskId: existing.id,
+        existingTitle: existing.title,
+      });
+    }
+  }
+
   const id = newId("tsk");
   const now = new Date().toISOString();
   write((db) => {
     db.run(
       `INSERT INTO tasks (id, board_id, column_id, title, description, assignee_id, created_by, priority,
-                          due_at, position, completed_at, blocked_reason, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          due_at, position, completed_at, blocked_reason, source_ref, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         boardId,
@@ -115,6 +140,7 @@ export function createTask(boardId: string, input: CreateTaskInput, actor: Actor
         positionForAppend(db, column.id),
         column.kind === "done" ? now : null,
         input.blockedReason?.trim() || null,
+        sourceRef,
         now,
         now,
       ],
@@ -125,6 +151,7 @@ export function createTask(boardId: string, input: CreateTaskInput, actor: Actor
       assignee: assigneeId,
       priority,
       dueAt,
+      sourceRef,
     });
   });
 
@@ -135,6 +162,7 @@ export function createTask(boardId: string, input: CreateTaskInput, actor: Actor
     assignee: assigneeId,
     priority,
     dueAt,
+    sourceRef,
     actor: actor.actorId,
     source: actor.source,
     requestId: actor.requestId,
@@ -290,6 +318,8 @@ export interface ListTasksFilter {
   includeDone?: boolean;
   includeArchivedBoards?: boolean;
   search?: string;
+  /** Exact match on the import key, to check whether something is already on the board. */
+  sourceRef?: string;
   limit?: number;
 }
 
@@ -336,6 +366,10 @@ export function listTasks(filter: ListTasksFilter = {}): TaskWithContext[] {
   if (!filter.includeDone) where.push("c.kind != 'done'");
   if (!filter.includeArchivedBoards) where.push("b.archived = 0");
   if (filter.overdueOnly) where.push("t.due_at IS NOT NULL AND datetime(t.due_at) < datetime('now')");
+  if (filter.sourceRef) {
+    where.push("t.source_ref = ?");
+    params.push(filter.sourceRef);
+  }
   if (filter.search) {
     where.push("(t.title LIKE ? OR IFNULL(t.description,'') LIKE ?)");
     const pattern = `%${filter.search.trim()}%`;

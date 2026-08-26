@@ -15,6 +15,10 @@ Comments run the other way too: write **`@claude`** on a card and the comment be
 request, which Claude picks up, carries out, and answers in the thread — optionally without you
 being there at all. See [Asking Claude for something](#asking-claude-for-something-claude).
 
+Boards can also fill themselves: **Sync** reads your Outlook and Teams since it last looked and
+adds a card for anything still waiting on you. See
+[Pulling work in](#pulling-work-in-from-outlook-and-teams).
+
 ```
 ┌──────────────┐        ┌──────────────┐        ┌──────────────┐
 │  React UI    │──HTTP──│  Express API │──┐     │  MCP server  │
@@ -53,6 +57,7 @@ Individually:
 | `bun run serve` | Build the UI and start the API serving it — one port, no Vite |
 | `bun run tunnel` | Publish the board on its Cloudflare hostname (see below) |
 | `bun run watch:mentions` | Act on `@claude` comments unattended (see below) |
+| `bun run watch:sync` | Run queued Outlook/Teams syncs (see below) |
 | `bun run typecheck` | `tsc --noEmit` across all four packages |
 | `bun run db:reset` | Delete the database and re-run migrations |
 | `bun run db:seed` | Add a sample board (skips if it already exists) |
@@ -146,6 +151,7 @@ priority task assigned to you"*.
 | `task_create` `task_get` `task_list` `task_update` `task_move` `task_comment` `task_delete` | tasks |
 | `my_queue` | everything assigned to Claude, most urgent first — the main entry point |
 | `mentions` `mention_claim` `mention_resolve` `mention_release` | the `@claude` inbox (see below) |
+| `sync_state` `sync_pending` `sync_request` `sync_claim` `sync_complete` `sync_cancel` | pulling work in from Outlook and Teams |
 
 Assignees accept natural aliases, so `"you"`, `"claude"` and `"agent"` all resolve to
 Claude, and `"me"`, `"i"` and `"human"` to you. Columns resolve by id, key or name, so
@@ -209,6 +215,88 @@ the watcher trusts that decision. Two defaults keep the blast radius small:
 Widen `MENTION_WATCH_ALLOWED_TOOLS` deliberately. See `.env.example` for the poll interval,
 per-run timeout, and how many attempts a request gets before the watcher gives up and says so
 on the card — because a request that fails quietly is worse than one that fails loudly.
+
+## Pulling work in from Outlook and Teams
+
+Every board has a **Sync** button. It reads your mail and Teams messages and adds a card for
+anything still outstanding — a direct ask, a question waiting on your answer, an approval sitting
+with you — while skipping newsletters, notifications and CC-for-information.
+
+It remembers where it got to. Each board keeps a watermark per source, so the second sync reads
+only what arrived since the first one finished:
+
+```
+board_sync_state          outlook  ──synced through──▶  Tue 22:17
+  (one row per source)    teams    ──synced through──▶  Tue 22:17
+                                        │
+              next run scans  (watermark, cutoff]  ── and only advances it if it succeeds
+```
+
+A failed run leaves the watermark where it was, so the window is re-read rather than skipped. A
+board that has never synced starts from its own window, capped at 14 days back — pointing Sync at
+a year-long board does not try to read a year of mail.
+
+Nothing is imported twice. Each card records the message it came from in `sourceRef`, unique per
+board, so re-running a sync over the same window is a no-op rather than a pile of duplicates.
+
+### The button queues the work; it does not do it
+
+Worth being clear about, because it explains the "Queued" state: the API process **cannot read
+your mailbox**. It has no Microsoft Graph credentials, and the access that exists lives in the
+Microsoft 365 MCP server — an agent's tool, not a library the server can call. So pressing Sync
+records a request with a resolved time window, and Claude performs it.
+
+Two ways that happens:
+
+```bash
+bun run watch:sync              # pick up queued syncs and run them
+bun run watch:sync --dry-run    # print the prompt it would send, spawn nothing
+bun run watch:sync --once       # one pass, then exit
+```
+
+…or just ask Claude in a session — `sync_pending` shows what is queued, and it can run it there.
+Without either, a press sits at **Queued** until something picks it up, which the button's tooltip
+says.
+
+Unlike the mention watcher, this one takes on the queue that already exists when it starts: you
+pressed a button and are watching a spinner, so leaving it for later would be wrong.
+
+### Where Microsoft 365 access comes from
+
+From your own **claude.ai Microsoft 365 connector** — the same one an interactive session uses. If
+Claude can already read your mail when you talk to it, a sync can too, and there is nothing extra
+to sign in to.
+
+That has one consequence worth knowing, because it is the exception to how the mention watcher
+works. A connector's credentials live with your account and cannot be written into a config file,
+so a sync run is **not** given `--strict-mcp-config`: the generated config is merged with your own
+rather than replacing it. The board server is still pinned in that generated config, so it keeps
+opening the right database.
+
+### What a sync run is allowed to do
+
+The tool allowlist is therefore the real boundary, and it is drawn deliberately. The connector also
+exposes `outlook_send_mail`, `outlook_forward_mail` and the rest, so a run is given an explicit
+list of **read** tools rather than the whole server:
+
+```
+mcp__board                                          write cards
+…__get_me  …__outlook_email_search
+…__chat_message_search  …__teams_list_chats          read inboxes
+…__outlook_calendar_search  …__read_resource
+```
+
+No file tools at all. A sync reads your inboxes and writes cards; it **cannot send mail, forward
+anything, or post to Teams**, which for a job that only needs to read is pure downside removed.
+Override with `SYNC_WATCH_ALLOWED_TOOLS` if you must, and note that widening it to
+`mcp__claude_ai_Microsoft_365` hands an unattended run the ability to mail people as you.
+
+If the connector is ever disconnected, a sync queues, attempts, and reports:
+
+> Could not read Outlook or Teams … Watermark left unmoved so the full window is re-read next run.
+
+Which is the system working: the watermark stays put, so nothing is skipped once it is reconnected
+and you press Sync again.
 
 ## Logs
 

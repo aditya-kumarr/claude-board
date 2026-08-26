@@ -129,6 +129,57 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_mentions_task ON task_mentions (task_id, created_at);
     `,
   },
+  {
+    version: 3,
+    name: "inbox_sync",
+    sql: /* sql */ `
+      -- Natural key of whatever a task was imported from ("outlook:AAMk...").
+      -- The partial unique index is what makes a sync re-runnable: importing the
+      -- same mail twice is a conflict, not a duplicate card.
+      ALTER TABLE tasks ADD COLUMN source_ref TEXT;
+      CREATE UNIQUE INDEX idx_tasks_source_ref ON tasks (board_id, source_ref)
+        WHERE source_ref IS NOT NULL;
+
+      -- The watermark, one row per board per source. Advanced only when a run
+      -- actually succeeds, so a failed sync re-reads its window instead of
+      -- skipping it.
+      CREATE TABLE board_sync_state (
+        board_id       TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        source         TEXT NOT NULL CHECK (source IN ('outlook','teams')),
+        synced_through TEXT,
+        last_run_at    TEXT,
+        last_status    TEXT CHECK (last_status IN ('ok','failed')),
+        last_detail    TEXT,
+        imported       INTEGER NOT NULL DEFAULT 0,
+        updated_at     TEXT NOT NULL,
+        PRIMARY KEY (board_id, source)
+      );
+
+      -- Queued work, because the process that can reach Microsoft Graph is not
+      -- the process serving the button. The web app enqueues; an agent run
+      -- claims, imports and completes.
+      CREATE TABLE sync_runs (
+        id           TEXT PRIMARY KEY,
+        board_id     TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        -- JSON: [{ "source": "outlook", "since": "<iso>" }, ...]
+        scope        TEXT NOT NULL,
+        status       TEXT NOT NULL CHECK (status IN ('pending','running','ok','failed','cancelled')),
+        requested_by TEXT NOT NULL REFERENCES users(id),
+        actor_source TEXT NOT NULL CHECK (actor_source IN ('web','mcp','system')),
+        -- Earliest point scanned, and the cutoff that becomes the new watermark.
+        since        TEXT NOT NULL,
+        cutoff       TEXT NOT NULL,
+        imported     INTEGER NOT NULL DEFAULT 0,
+        detail       TEXT,
+        started_at   TEXT,
+        finished_at  TEXT,
+        created_at   TEXT NOT NULL
+      );
+
+      CREATE INDEX idx_sync_runs_board  ON sync_runs (board_id, id DESC);
+      CREATE INDEX idx_sync_runs_status ON sync_runs (status, created_at);
+    `,
+  },
 ];
 
 /** Assignees exist before any board does, so both transports can reference them. */

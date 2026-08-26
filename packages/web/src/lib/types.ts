@@ -46,6 +46,8 @@ export interface Task {
   position: number;
   completedAt: string | null;
   blockedReason: string | null;
+  /** Import key when this card came from Outlook or Teams. */
+  sourceRef: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -102,6 +104,48 @@ export interface MentionWithContext extends Mention {
   columnKind: ColumnKind;
 }
 
+export type SyncSource = "outlook" | "teams";
+export type SyncStatus = "pending" | "running" | "ok" | "failed" | "cancelled";
+
+/** Per-source watermark: everything up to `syncedThrough` has been considered. */
+export interface BoardSyncState {
+  boardId: string;
+  source: SyncSource;
+  syncedThrough: string | null;
+  lastRunAt: string | null;
+  lastStatus: "ok" | "failed" | null;
+  lastDetail: string | null;
+  imported: number;
+  updatedAt: string;
+}
+
+export interface SyncScopeEntry {
+  source: SyncSource;
+  since: string;
+}
+
+export interface SyncRun {
+  id: string;
+  boardId: string;
+  scope: SyncScopeEntry[];
+  status: SyncStatus;
+  requestedBy: string;
+  actorSource: "web" | "mcp" | "system";
+  since: string;
+  cutoff: string;
+  imported: number;
+  detail: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
+export interface BoardSyncSummary {
+  sources: BoardSyncState[];
+  activeRun: SyncRun | null;
+  lastRun: SyncRun | null;
+}
+
 export interface ActivityEntry {
   id: number;
   boardId: string | null;
@@ -145,6 +189,7 @@ export interface BoardDetail {
   tasks: Task[];
   stats: BoardStats;
   openMentions: MentionWithContext[];
+  sync: BoardSyncSummary;
 }
 
 export interface TaskDetail {
@@ -187,6 +232,8 @@ export const MENTION_STATUS_LABELS: Record<MentionStatus, string> = {
   answered: "Answered",
   dismissed: "Not actioned",
 };
+
+export const SYNC_SOURCE_LABELS: Record<SyncSource, string> = { outlook: "Outlook", teams: "Teams" };
 
 export const kindColor = (kind: ColumnKind): string => `var(--kind-${kind})`;
 export const priorityColor = (priority: Priority): string => `var(--prio-${priority})`;

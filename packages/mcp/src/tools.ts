@@ -14,17 +14,24 @@ import {
   DURATION_KINDS,
   getBoardDetail,
   getTaskDetail,
+  cancelSyncRun,
   claimMention,
+  claimSyncRun,
+  completeSyncRun,
+  getSyncSummary,
   listActivity,
   listBoards,
   listColumns,
   listMentions,
+  listSyncRuns,
   listTasks,
   MENTION_STATUSES,
   moveTask,
   PRIORITIES,
   releaseMention,
+  requestSync,
   resolveMention,
+  SYNC_SOURCES,
   updateBoard,
   updateColumn,
   updateTask,
@@ -38,6 +45,9 @@ import {
   renderColumns,
   renderMention,
   renderMentions,
+  renderSyncRun,
+  renderSyncRuns,
+  renderSyncState,
   renderTaskDetail,
   renderTaskList,
 } from "./format.ts";
@@ -318,6 +328,12 @@ export function registerTools(server: McpServer): void {
           .optional()
           .describe("ISO date/datetime inside the board window. A bare YYYY-MM-DD means end of that day."),
         blockedReason: z.string().optional().describe("Only meaningful when starting in a blocked state."),
+        sourceRef: z
+          .string()
+          .optional()
+          .describe(
+            'Import key when this card comes from somewhere else, as "<source>:<stable id>" — e.g. "outlook:<message id>" or "teams:<message id>". Unique per board: a conflict naming an existingTaskId means you already imported that item, so skip it rather than making a second card. Always set this when importing during a sync.',
+          ),
       },
     },
     handler("task_create", ({ boardId, ...input }: { boardId: string } & Record<string, unknown>, ctx) => {
@@ -351,6 +367,7 @@ export function registerTools(server: McpServer): void {
         columnKind: columnKind.optional().describe("Filter by semantic state instead of a specific column."),
         priority: priority.optional(),
         search: z.string().optional().describe("Substring match on title and description."),
+        sourceRef: z.string().optional().describe("Exact import key, to check whether an item is already on a board."),
         overdueOnly: z.boolean().optional().describe("Only unfinished tasks past their due date."),
         includeDone: z.boolean().optional(),
         limit: z.number().int().min(1).max(1000).optional(),
@@ -582,6 +599,220 @@ export function registerTools(server: McpServer): void {
     handler("mention_release", (args: { mentionId: string; reason: string }, ctx) => {
       const mention = releaseMention(args.mentionId, args.reason, ctx);
       return `Request ${mention.id} is pending again.\n\n${renderMention(mention)}`;
+    }),
+  );
+
+  /* -------------------------------------------------------------- inbox sync */
+
+  server.registerTool(
+    "sync_state",
+    {
+      title: "Inbox sync watermarks",
+      description:
+        "Where a board's Outlook/Teams sync has got to: how far each source has been read, when it last ran, and whether a request is outstanding. The watermark is the contract — the next run reads from it, so never re-scan from further back without a reason.",
+      inputSchema: { boardId: z.string() },
+      annotations: { readOnlyHint: true },
+    },
+    handler("sync_state", (args: { boardId: string }) => renderSyncState(getSyncSummary(args.boardId))),
+  );
+
+  server.registerTool(
+    "sync_pending",
+    {
+      title: "Queued inbox syncs",
+      description:
+        "Sync requests waiting to be run, oldest first. The board app cannot reach Microsoft Graph itself, so pressing Sync only queues the work — this is where it lands, and running it is your job. Check here alongside mentions when catching up.",
+      inputSchema: {
+        boardId: z.string().optional().describe("Restrict to one board."),
+        includeFinished: z.boolean().optional().describe("Also list completed runs. Default false."),
+        limit: z.number().int().min(1).max(200).optional().describe("Default 20."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    handler("sync_pending", (args: { boardId?: string; includeFinished?: boolean; limit?: number }) => {
+      const runs = listSyncRuns({
+        boardId: args.boardId,
+        status: args.includeFinished ? undefined : ["pending", "running"],
+        oldestFirst: !args.includeFinished,
+        limit: args.limit,
+      });
+      const body = renderSyncRuns(runs, args.includeFinished ? "Sync runs" : "Queued syncs");
+      if (runs.length === 0) return `${body}\n\nNothing to sync. sync_request queues one if the user asks.`;
+      return `${body}\n\nNext step: sync_claim <runId> — it returns the window to read and the rules for what becomes a task.`;
+    }),
+  );
+
+  server.registerTool(
+    "sync_request",
+    {
+      title: "Queue an inbox sync",
+      description:
+        "Queue a sync for a board, as the Sync button does. Use this when the user asks you to check their mail or Teams for a board rather than pressing the button themselves; then sync_claim it and carry it out. Pressing twice does not stack: an outstanding request is returned as-is.",
+      inputSchema: {
+        boardId: z.string(),
+        sources: z
+          .array(z.enum(SYNC_SOURCES))
+          .optional()
+          .describe("Which inboxes to read. Defaults to both outlook and teams."),
+        since: z
+          .string()
+          .optional()
+          .describe("Override the stored watermark for this run only (ISO). Omit to continue where the last run stopped."),
+        lookbackDays: z
+          .number()
+          .int()
+          .min(1)
+          .max(365)
+          .optional()
+          .describe("How far back to look when this board has never synced. Default 14."),
+      },
+    },
+    handler(
+      "sync_request",
+      (args: { boardId: string; sources?: string[]; since?: string; lookbackDays?: number }, ctx) => {
+        const { boardId, ...input } = args;
+        const { run, alreadyQueued } = requestSync(boardId, input, ctx);
+        return (
+          `${alreadyQueued ? "A sync was already queued for this board." : "Sync queued."}\n\n` +
+          `${renderSyncRun(listSyncRuns({ boardId, limit: 50 }).find((entry) => entry.id === run.id)!)}\n\n` +
+          `Next step: sync_claim ${run.id}.`
+        );
+      },
+    ),
+  );
+
+  server.registerTool(
+    "sync_claim",
+    {
+      title: "Run a queued inbox sync",
+      description:
+        "Take a queued sync and get everything needed to run it: the exact time window per source, the board's states, and the rules for what should become a task. You do the reading with the Microsoft 365 tools and the writing with task_create, then close it out with sync_complete. Claim before reading so a second run does not import the same mail twice.",
+      inputSchema: { runId: z.string().describe("Run id from sync_pending, e.g. syn_a1b2c3d4.") },
+    },
+    handler("sync_claim", (args: { runId: string }, ctx) => {
+      const run = claimSyncRun(args.runId, ctx);
+      const board = getBoardDetail(run.boardId);
+      const windows = run.scope
+        .map((entry) => `  - ${entry.source}: everything from ${entry.since} up to ${run.cutoff}`)
+        .join("\n");
+
+      return [
+        `Claimed ${run.id}.`,
+        "",
+        renderSyncRun(run),
+        "",
+        "WINDOW TO READ (do not read outside it — the watermark exists so you do not re-read old mail):",
+        windows,
+        "",
+        "HOW TO READ IT — with whichever Microsoft 365 tools you have; names vary by connector:",
+        run.scope.some((entry) => entry.source === "outlook")
+          ? "  outlook: a mail search restricted to the window (e.g. outlook_email_search with a received range,\n" +
+            "           or list-mail-messages with a receivedDateTime filter). Open a message body only when the\n" +
+            "           subject and sender are not enough to judge whether it is a task."
+          : null,
+        run.scope.some((entry) => entry.source === "teams")
+          ? "  teams:   list your chats, then search messages within the window (e.g. teams_list_chats plus\n" +
+            "           chat_message_search, or list-chats plus list-chat-messages)."
+          : null,
+        "  You have read access only. If an item needs a reply, that is a task for the user to do — never",
+        "  send, forward or post anything yourself.",
+        "  Microsoft Graph throttles hard (HTTP 429 with a retryAfterSeconds). Page through results rather",
+        "  than issuing many small searches, wait out a 429 once, and if you are still throttled after that,",
+        "  stop and sync_complete with status=failed — the watermark stays put, so retrying later loses",
+        "  nothing. Half-reading the window and reporting ok is the one genuinely damaging outcome.",
+        "",
+        "WHAT BECOMES A TASK — a thing the user still owes someone:",
+        "  yes: a direct ask or assignment, a question awaiting their answer, a commitment they made,",
+        "       an approval or review waiting on them, a deadline they were given.",
+        "  no:  newsletters, automated notifications, calendar noise, CC-for-information, marketing,",
+        "       anything already done, and anything that is only a reply to something they said.",
+        "  When it is genuinely ambiguous, skip it and say so in sync_complete. A board full of",
+        "  non-tasks is worse than a board missing one.",
+        "",
+        "HOW TO CREATE EACH ONE (task_create):",
+        `  boardId    ${run.boardId}`,
+        `  sourceRef  REQUIRED. "outlook:<message id>" or "teams:<message id>" — a conflict naming an`,
+        "             existingTaskId means it was already imported, so skip it and keep going.",
+        "  title      short and imperative, what the user has to do — not the subject line verbatim.",
+        "  description who asked, when, where it came from, and the ask in their words. This is the only",
+        "             provenance the card will ever have, so include enough to act without reopening the mail.",
+        '  assignee   "me" — this is the user\'s inbox, so the work is theirs unless the mail says otherwise.',
+        "  dueAt      only when the source states or clearly implies one, and it must fall inside the board",
+        `             window (ends ${run.boardEndsAt}). Omit it to inherit the board deadline.`,
+        "  priority   from the ask, not from the sender's tone. Default medium.",
+        "",
+        "STATES ON THIS BOARD (imported cards belong in the leftmost/backlog one unless already underway):",
+        renderColumns(board.columns),
+        "",
+        `FINALLY: sync_complete ${run.id} with the count and a one-line summary of what you found and skipped.`,
+        "Complete it even when you import nothing — a run left running makes the board show a sync that never ends.",
+      ]
+        .filter((line): line is string => line !== null)
+        .join("\n");
+    }),
+  );
+
+  server.registerTool(
+    "sync_complete",
+    {
+      title: "Close out an inbox sync",
+      description:
+        "Finish a claimed sync. On status=ok the window you just read becomes the board's new watermark, so the next run starts where this one stopped — only report ok if you actually read the whole window. On status=failed the watermark stays put and the window is re-read next time, which is the right outcome when Graph errored or you could not finish. `detail` is what the user sees as the result, so say what you imported and what you skipped.",
+      inputSchema: {
+        runId: z.string(),
+        imported: z
+          .record(z.enum(SYNC_SOURCES), z.number().int().min(0))
+          .optional()
+          .describe(
+            'Tasks created, per source — e.g. { "outlook": 2, "teams": 0 }. Name every source the run scanned; a total spread across both would credit Teams for Outlook mail.',
+          ),
+        detail: z
+          .string()
+          .describe(
+            "One or two lines the user will read: what you brought in, what you deliberately skipped, and anything they should look at themselves.",
+          ),
+        status: z
+          .enum(["ok", "failed"])
+          .optional()
+          .describe("Default ok. Use failed if you could not read the whole window — it keeps the watermark unmoved."),
+      },
+    },
+    handler(
+      "sync_complete",
+      (
+        args: {
+          runId: string;
+          imported?: Partial<Record<(typeof SYNC_SOURCES)[number], number>>;
+          detail: string;
+          status?: "ok" | "failed";
+        },
+        ctx,
+      ) => {
+        const { runId, ...input } = args;
+        const run = completeSyncRun(runId, input, ctx);
+        return (
+          `Sync ${run.id} marked ${run.status}. ${
+            run.status === "ok"
+              ? `Watermark advanced to ${run.cutoff}.`
+              : "Watermark left where it was; the next run re-reads this window."
+          }\n\n${renderSyncState(getSyncSummary(run.boardId))}`
+        );
+      },
+    ),
+  );
+
+  server.registerTool(
+    "sync_cancel",
+    {
+      title: "Abandon an inbox sync",
+      description:
+        "Drop a queued or running sync without moving the watermark — for a request that is no longer wanted, or one left running by a dead process. Prefer sync_complete with status=failed when you tried and could not finish, so the reason lands on the board.",
+      inputSchema: { runId: z.string(), reason: z.string().describe("Why it is being abandoned.") },
+      annotations: { destructiveHint: true },
+    },
+    handler("sync_cancel", (args: { runId: string; reason: string }, ctx) => {
+      const run = cancelSyncRun(args.runId, args.reason, ctx);
+      return `Sync ${run.id} cancelled. Watermark unchanged.`;
     }),
   );
 

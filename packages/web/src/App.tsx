@@ -73,6 +73,47 @@ export default function App() {
 
   const fail = useCallback((message: string) => toast.error(message), []);
 
+  const [syncing, setSyncing] = useState(false);
+
+  /**
+   * Queues a sync. The API cannot reach Outlook or Teams itself, so success here
+   * means "asked", not "done" — the toast says so rather than implying the mail
+   * has already been read. The result arrives via the revision poll when an agent
+   * run finishes it.
+   */
+  const cancelSync = useCallback(async () => {
+    if (!activeBoard) return;
+    setSyncing(true);
+    try {
+      await api.cancelSync(activeBoard.board.id);
+      toast.success("Sync cancelled", { description: "Nothing was read, so the watermark is unchanged." });
+      await refresh();
+    } catch (error) {
+      fail(error instanceof ApiError ? error.message : "Could not cancel the sync");
+    } finally {
+      setSyncing(false);
+    }
+  }, [activeBoard, refresh, fail]);
+
+  const syncBoard = useCallback(async () => {
+    if (!activeBoard) return;
+    setSyncing(true);
+    try {
+      const { run, alreadyQueued } = await api.requestSync(activeBoard.board.id);
+      const scope = run.scope.map((entry) => entry.source).join(" + ");
+      toast.success(alreadyQueued ? "Already queued" : `Sync queued for ${scope}`, {
+        description: alreadyQueued
+          ? "A sync for this board is already waiting to run."
+          : "Claude reads your Outlook and Teams since the last sync and adds what is still outstanding.",
+      });
+      await refresh();
+    } catch (error) {
+      fail(error instanceof ApiError ? error.message : "Could not queue the sync");
+    } finally {
+      setSyncing(false);
+    }
+  }, [activeBoard, refresh, fail]);
+
   const drop = useCallback(
     async (columnId: string, index: number) => {
       const taskId = draggingTaskId;
@@ -199,6 +240,9 @@ export default function App() {
                 }}
                 onArchive={() => void archiveBoard()}
                 onDelete={() => void removeBoard()}
+                onSync={() => void syncBoard()}
+                onCancelSync={() => void cancelSync()}
+                syncing={syncing}
               />
 
               <div

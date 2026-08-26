@@ -28,6 +28,25 @@ export type MentionStatus = (typeof MENTION_STATUSES)[number];
 /** Statuses that still need someone to act. */
 export const OPEN_MENTION_STATUSES: readonly MentionStatus[] = ["pending", "claimed"];
 
+/**
+ * Inboxes a board can pull pending work from. Both are reached through the
+ * Microsoft 365 MCP server rather than from the API process, which holds no
+ * Graph credentials of its own.
+ */
+export const SYNC_SOURCES = ["outlook", "teams"] as const;
+export type SyncSource = (typeof SYNC_SOURCES)[number];
+
+/**
+ * A sync is queued rather than performed inline: the process serving the button
+ * cannot reach Microsoft Graph, so it records the request and an agent run picks
+ * it up. `ok`/`failed` are terminal.
+ */
+export const SYNC_STATUSES = ["pending", "running", "ok", "failed", "cancelled"] as const;
+export type SyncStatus = (typeof SYNC_STATUSES)[number];
+
+/** Statuses where a run is still expected to do something. */
+export const OPEN_SYNC_STATUSES: readonly SyncStatus[] = ["pending", "running"];
+
 /** Seeded, stable ids so both the UI and the agent can reference assignees. */
 export const USER_ME = "me";
 export const USER_CLAUDE = "claude";
@@ -75,6 +94,11 @@ export interface Task {
   position: number;
   completedAt: string | null;
   blockedReason: string | null;
+  /**
+   * Where this card was imported from, e.g. `outlook:AAMkAD...`. Unique per
+   * board, so re-running a sync over the same window cannot duplicate a card.
+   */
+  sourceRef: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -130,6 +154,63 @@ export interface MentionWithContext extends Mention {
   columnKind: ColumnKind;
 }
 
+/** Per-source watermark for one board. */
+export interface BoardSyncState {
+  boardId: string;
+  source: SyncSource;
+  /**
+   * Everything up to this instant has already been considered. The next run
+   * starts here, which is the whole point of keeping it.
+   */
+  syncedThrough: string | null;
+  lastRunAt: string | null;
+  lastStatus: "ok" | "failed" | null;
+  lastDetail: string | null;
+  /** Cards created from this source, cumulative. */
+  imported: number;
+  updatedAt: string;
+}
+
+/** One source in a run's scope, with the window resolved for it. */
+export interface SyncScopeEntry {
+  source: SyncSource;
+  since: string;
+}
+
+export interface SyncRun {
+  id: string;
+  boardId: string;
+  scope: SyncScopeEntry[];
+  status: SyncStatus;
+  requestedBy: string;
+  actorSource: ActorSource;
+  since: string;
+  /** Becomes each scanned source's new watermark, but only if the run succeeds. */
+  cutoff: string;
+  imported: number;
+  detail: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
+export interface SyncRunWithContext extends SyncRun {
+  boardName: string;
+  boardStartsAt: string;
+  boardEndsAt: string;
+  boardDurationKind: DurationKind;
+  boardDescription: string | null;
+}
+
+/** Everything the UI needs to render one board's Sync control. */
+export interface BoardSyncSummary {
+  sources: BoardSyncState[];
+  /** A pending or running request, if one is outstanding. */
+  activeRun: SyncRun | null;
+  /** Most recent finished run, for "last synced" and the failure reason. */
+  lastRun: SyncRun | null;
+}
+
 export interface ActivityEntry {
   id: number;
   boardId: string | null;
@@ -182,4 +263,6 @@ export interface BoardDetail {
    * a reply without a request per task.
    */
   openMentions: MentionWithContext[];
+  /** Watermarks and outstanding request for this board's inbox sync. */
+  sync: BoardSyncSummary;
 }

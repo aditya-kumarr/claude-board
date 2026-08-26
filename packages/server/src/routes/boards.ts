@@ -5,10 +5,15 @@ import {
   createTask,
   deleteBoard,
   deleteColumn,
+  cancelSyncRun,
   getBoardDetail,
+  getSyncSummary,
   listActivity,
   listBoards,
   listColumns,
+  listSyncRuns,
+  notFound,
+  requestSync,
   updateBoard,
   updateColumn,
 } from "@automation/core";
@@ -56,6 +61,48 @@ boardsRouter.get(
   "/:boardId/activity",
   route((req, res) => {
     res.json({ activity: listActivity({ boardId: param(req, "boardId"), limit: Number(req.query.limit) || 50 }) });
+  }),
+);
+
+/* ---- inbox sync ---- */
+
+/**
+ * Queues a sync; it does not perform one. This process has no Microsoft Graph
+ * credentials — that access lives in the MS365 MCP server, which an agent talks
+ * to — so the honest thing to return is the queued request, and `202` rather
+ * than `200`. `alreadyQueued` tells the UI a double-tap did not stack a run.
+ */
+boardsRouter.post(
+  "/:boardId/sync",
+  route((req, res) => {
+    const result = requestSync(param(req, "boardId"), req.body ?? {}, actorFrom(req));
+    res.status(result.alreadyQueued ? 200 : 202).json(result);
+  }),
+);
+
+boardsRouter.get(
+  "/:boardId/sync",
+  route((req, res) => {
+    const boardId = param(req, "boardId");
+    res.json({
+      ...getSyncSummary(boardId),
+      runs: listSyncRuns({ boardId, limit: Number(req.query.limit) || 10 }),
+    });
+  }),
+);
+
+/**
+ * Drops the outstanding request. Needed because a queued sync with nothing
+ * listening would otherwise wedge the board: the button is disabled while a run
+ * is outstanding, so without this there is no way back.
+ */
+boardsRouter.delete(
+  "/:boardId/sync",
+  route((req, res) => {
+    const boardId = param(req, "boardId");
+    const { activeRun } = getSyncSummary(boardId);
+    if (!activeRun) throw notFound("outstanding sync for this board");
+    res.json(cancelSyncRun(activeRun.id, String(req.body?.reason ?? "cancelled from the board"), actorFrom(req)));
   }),
 );
 

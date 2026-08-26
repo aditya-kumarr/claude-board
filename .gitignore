@@ -10,3 +10,4 @@ logs/*.jsonl
 .env
 cloudflared/config.generated.yml
 data/mention-watch.mcp.json
+data/sync-watch.mcp.json

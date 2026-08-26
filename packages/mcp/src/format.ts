@@ -4,7 +4,9 @@ import {
   type ActivityEntry,
   type BoardColumn,
   type BoardDetail,
+  type BoardSyncSummary,
   type MentionWithContext,
+  type SyncRunWithContext,
   type Task,
   type TaskComment,
   type TaskWithContext,
@@ -64,6 +66,7 @@ export function renderBoard(detail: BoardDetail, options: { includeDone?: boolea
     stats.openMentions > 0
       ? `>> ${stats.openMentions} unanswered @claude request(s) in this board's comments — call mentions to read them.`
       : null,
+    syncLine(detail.sync),
     "",
   ].filter((line): line is string => line !== null);
 
@@ -82,6 +85,54 @@ export function renderBoard(detail: BoardDetail, options: { includeDone?: boolea
   }
 
   return lines.join("\n").trimEnd();
+}
+
+/** One line on where this board's inbox sync stands, or nothing to say. */
+function syncLine(sync: BoardSyncSummary): string | null {
+  if (sync.activeRun) {
+    return `inbox sync: ${sync.activeRun.status} (${sync.activeRun.id}) for ${sync.activeRun.scope
+      .map((entry) => entry.source)
+      .join("+")} — ${sync.activeRun.status === "pending" ? "call sync_claim to run it" : "already claimed"}`;
+  }
+  const synced = sync.sources.filter((state) => state.syncedThrough !== null);
+  if (synced.length === 0) return "inbox sync: never run for this board";
+  return `inbox sync: ${synced
+    .map((state) => `${state.source} through ${shortDate(state.syncedThrough)}${state.lastStatus === "failed" ? " (last run FAILED)" : ""}`)
+    .join(", ")}`;
+}
+
+export function renderSyncRun(run: SyncRunWithContext): string {
+  return [
+    `${run.id}  [${run.status}]  board="${run.boardName}" (${run.boardId})`,
+    `  scope: ${run.scope.map((entry) => `${entry.source} since ${shortDate(entry.since)}`).join(", ")}`,
+    `  cutoff: ${shortDate(run.cutoff)} — becomes the new watermark only if this run succeeds`,
+    `  board window: ${shortDate(run.boardStartsAt)} to ${shortDate(run.boardEndsAt)} [${run.boardDurationKind}]`,
+    run.boardDescription ? `  board note: ${run.boardDescription}` : null,
+    `  requested by ${who(run.requestedBy)} via ${run.actorSource} ${shortDate(run.createdAt)}`,
+    run.imported ? `  imported: ${run.imported}` : null,
+    run.detail ? `  detail: ${run.detail}` : null,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+}
+
+export function renderSyncRuns(runs: SyncRunWithContext[], heading: string): string {
+  if (runs.length === 0) return `${heading}\n  (nothing queued)`;
+  return [`${heading}  --  ${runs.length} run(s)`, "", runs.map(renderSyncRun).join("\n\n")].join("\n");
+}
+
+export function renderSyncState(sync: BoardSyncSummary): string {
+  const lines = ["inbox sync state:"];
+  for (const state of sync.sources) {
+    lines.push(
+      `  ${state.source.padEnd(8)} synced through ${state.syncedThrough ? shortDate(state.syncedThrough) : "never"}` +
+        `  lastRun=${state.lastRunAt ? shortDate(state.lastRunAt) : "—"}` +
+        `  lastStatus=${state.lastStatus ?? "—"}  importedTotal=${state.imported}`,
+    );
+    if (state.lastDetail) lines.push(`           last detail: ${state.lastDetail}`);
+  }
+  if (sync.activeRun) lines.push(`  outstanding request: ${sync.activeRun.id} [${sync.activeRun.status}]`);
+  return lines.join("\n");
 }
 
 export function renderBoardSummary(detail: BoardDetail): string {
