@@ -3,7 +3,8 @@ import { Avatar } from "@/components/ui/misc";
 import { Hint } from "@/components/ui/tooltip";
 import { formatDue } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { priorityColor, type BoardResponseCount, type ColumnKind, type Task, type User } from "@/lib/types";
+import { ProjectChip } from "@/components/project-select";
+import { priorityColor, type BoardResponseCount, type ColumnKind, type Project, type Task, type User } from "@/lib/types";
 
 const ASSIGNEE_TINT: Record<string, string> = { me: "var(--kind-active)", claude: "var(--primary)" };
 
@@ -16,6 +17,8 @@ export interface TaskCardProps {
   openMentions?: number;
   /** Draft replies held against this card, and how many are the user's to send. */
   replies?: BoardResponseCount;
+  /** Set only when this card points somewhere other than its board's project. */
+  projectOverride?: Project;
   dragging: boolean;
   onOpen: () => void;
   onDragStart: (event: React.DragEvent) => void;
@@ -34,6 +37,7 @@ export function TaskCard({
   now,
   openMentions = 0,
   replies,
+  projectOverride,
   dragging,
   onOpen,
   onDragStart,
@@ -157,6 +161,10 @@ export function TaskCard({
             </span>
           </Hint>
         ) : null}
+
+        {/* Only ever an override: it is here to say "this one is somewhere else",
+            which is the only thing about a project a column scan needs to know. */}
+        {projectOverride ? <ProjectChip project={projectOverride} via="task" /> : null}
 
         {task.dueAt ? (
           <span

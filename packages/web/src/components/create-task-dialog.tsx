@@ -6,9 +6,18 @@ import { Input, Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Avatar } from "@/components/ui/misc";
+import { ProjectSelect, shortPath } from "@/components/project-select";
 import { api, ApiError } from "@/lib/api";
 import { formatDateTime, toLocalInputValue } from "@/lib/format";
-import { kindColor, priorityColor, PRIORITY_LABELS, type BoardDetail, type Priority, type User } from "@/lib/types";
+import {
+  kindColor,
+  priorityColor,
+  PRIORITY_LABELS,
+  type BoardDetail,
+  type Priority,
+  type Project,
+  type User,
+} from "@/lib/types";
 
 const PRIORITIES: Priority[] = ["low", "medium", "high", "urgent"];
 const UNASSIGNED = "__unassigned__";
@@ -16,6 +25,7 @@ const UNASSIGNED = "__unassigned__";
 export function CreateTaskDialog({
   board,
   users,
+  projects,
   defaultColumnId,
   open,
   onOpenChange,
@@ -23,6 +33,7 @@ export function CreateTaskDialog({
 }: {
   board: BoardDetail | null;
   users: User[];
+  projects: Project[];
   defaultColumnId: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -34,6 +45,8 @@ export function CreateTaskDialog({
   const [assignee, setAssignee] = useState<string>(UNASSIGNED);
   const [priority, setPriority] = useState<Priority>("medium");
   const [dueAt, setDueAt] = useState("");
+  /** `null` means "inherit the board's", which is the right default for most cards. */
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,8 +58,12 @@ export function CreateTaskDialog({
     setAssignee(UNASSIGNED);
     setPriority("medium");
     setDueAt("");
+    setProjectId(null);
     setError(null);
   }, [open, board?.board.id, defaultColumnId]);
+
+  const boardProject = projects.find((project) => project.id === board?.board.projectId) ?? null;
+  const effectiveProject = (projectId ? projects.find((project) => project.id === projectId) : null) ?? boardProject;
 
   const submit = async () => {
     if (!board) return;
@@ -65,6 +82,8 @@ export function CreateTaskDialog({
         priority,
         // Left empty, the server inherits the board's deadline.
         dueAt: dueAt ? new Date(dueAt).toISOString() : undefined,
+        // Left unset, the card inherits the board's project — not "no project".
+        project: projectId ?? undefined,
       });
       onOpenChange(false);
       onCreated();
@@ -189,6 +208,18 @@ export function CreateTaskDialog({
               onChange={(event) => setDueAt(event.target.value)}
             />
           </div>
+
+          {/* Full width and last: on most boards the answer is "the board's", and
+              a card that belongs to a different checkout is the exception. */}
+          <div className="space-y-1.5 sm:col-span-2">
+            <Label hint="where the work happens">Project</Label>
+            <ProjectSelect
+              projects={projects}
+              value={projectId}
+              inheritFrom={boardProject}
+              onChange={setProjectId}
+            />
+          </div>
         </div>
 
         {assignee === "claude" ? (
@@ -196,6 +227,13 @@ export function CreateTaskDialog({
             <Sparkles className="mt-0.5 size-3.5 shrink-0 text-primary" />
             Claude picks this up from <span className="font-mono text-[11px]">my_queue</span> over the MCP server, works
             it, and reports back in the task thread.
+            {effectiveProject ? (
+              <>
+                {" "}
+                An <span className="font-mono text-[11px]">@claude</span> request on it runs inside{" "}
+                <span className="font-mono text-[11px]">{shortPath(effectiveProject.path)}</span>.
+              </>
+            ) : null}
           </p>
         ) : null}
 

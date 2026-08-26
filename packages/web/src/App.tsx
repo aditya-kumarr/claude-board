@@ -11,16 +11,18 @@ import { TaskDialog } from "@/components/task-dialog";
 import { IntakePanel } from "@/components/intake-panel";
 import { CreateBoardDialog } from "@/components/create-board-dialog";
 import { CreateTaskDialog } from "@/components/create-task-dialog";
+import { ProjectsDialog } from "@/components/projects-dialog";
+import { BoardProjectDialog } from "@/components/board-project-dialog";
 import { ColumnDialog } from "@/components/column-dialog";
 import { ActivityView, QueueView } from "@/components/queue-view";
 import { useBoards, useNow } from "@/hooks/use-boards";
 import { api, ApiError } from "@/lib/api";
-import type { BoardColumn } from "@/lib/types";
+import type { BoardColumn, Project } from "@/lib/types";
 
 const VIEW_STORAGE_KEY = "automation.view";
 
 export default function App() {
-  const { boards, users, loading, error, refresh, remoteChangeAt } = useBoards();
+  const { boards, users, projects, loading, error, refresh, remoteChangeAt } = useBoards();
   const now = useNow(30_000);
 
   const [view, setView] = useState<SidebarView>(() => {
@@ -37,6 +39,8 @@ export default function App() {
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [taskDialogColumn, setTaskDialogColumn] = useState<string | null>(null);
   const [columnDialogOpen, setColumnDialogOpen] = useState(false);
+  const [projectsDialogOpen, setProjectsDialogOpen] = useState(false);
+  const [boardProjectOpen, setBoardProjectOpen] = useState(false);
   const [intakeOpen, setIntakeOpen] = useState(false);
   const [editingColumn, setEditingColumn] = useState<BoardColumn | null>(null);
 
@@ -85,6 +89,23 @@ export default function App() {
     () => new Map((activeBoard?.responses ?? []).map((entry) => [entry.taskId, entry])),
     [activeBoard?.responses],
   );
+
+  /**
+   * Only the cards pointed somewhere other than their board's project. Derived
+   * here for the same reason the two maps above are — and filtered to overrides
+   * because the board's own project is already in the header, so repeating it on
+   * every card would bury the handful that actually differ.
+   */
+  const projectOverrides = useMemo(() => {
+    const byId = new Map(projects.map((project) => [project.id, project]));
+    const overrides = new Map<string, Project>();
+    for (const task of activeBoard?.tasks ?? []) {
+      if (!task.projectId || task.projectId === activeBoard?.board.projectId) continue;
+      const project = byId.get(task.projectId);
+      if (project) overrides.set(task.id, project);
+    }
+    return overrides;
+  }, [activeBoard?.tasks, activeBoard?.board.projectId, projects]);
 
   const fail = useCallback((message: string) => toast.error(message), []);
 
@@ -202,6 +223,8 @@ export default function App() {
           live={live}
           onSelect={setView}
           onCreateBoard={() => setBoardDialogOpen(true)}
+          onOpenProjects={() => setProjectsDialogOpen(true)}
+          projectCount={projects.length}
         />
 
         <main className="flex min-w-0 flex-1 flex-col">
@@ -258,6 +281,7 @@ export default function App() {
                 onSync={() => void syncBoard()}
                 onCancelSync={() => void cancelSync()}
                 onOpenIntake={() => setIntakeOpen(true)}
+                onSetProject={() => setBoardProjectOpen(true)}
                 syncing={syncing}
               />
 
@@ -279,6 +303,7 @@ export default function App() {
                     now={now}
                     mentionCounts={mentionCounts}
                     responseCounts={responseCounts}
+                    projectOverrides={projectOverrides}
                     draggingTaskId={draggingTaskId}
                     dropIndex={dropTarget?.columnId === column.id ? dropTarget.index : null}
                     onTaskDragStart={setDraggingTaskId}
@@ -350,6 +375,7 @@ export default function App() {
         taskId={openTaskId}
         boards={boards}
         users={users}
+        projects={projects}
         revisionKey={remoteChangeAt}
         onClose={() => setOpenTaskId(null)}
         onChanged={() => void refresh()}
@@ -357,6 +383,7 @@ export default function App() {
       />
 
       <CreateBoardDialog
+        projects={projects}
         open={boardDialogOpen}
         onOpenChange={setBoardDialogOpen}
         onCreated={(boardId) => {
@@ -369,6 +396,7 @@ export default function App() {
       <CreateTaskDialog
         board={activeBoard}
         users={users}
+        projects={projects}
         defaultColumnId={taskDialogColumn}
         open={taskDialogOpen}
         onOpenChange={setTaskDialogOpen}
@@ -376,6 +404,25 @@ export default function App() {
           void refresh();
           toast.success("Task added");
         }}
+      />
+
+      <ProjectsDialog
+        projects={projects}
+        open={projectsDialogOpen}
+        onOpenChange={setProjectsDialogOpen}
+        onChanged={() => void refresh()}
+      />
+
+      <BoardProjectDialog
+        board={activeBoard}
+        projects={projects}
+        open={boardProjectOpen}
+        onOpenChange={setBoardProjectOpen}
+        onSaved={() => {
+          void refresh();
+          toast.success("Board project set");
+        }}
+        onManageProjects={() => setProjectsDialogOpen(true)}
       />
 
       <ColumnDialog

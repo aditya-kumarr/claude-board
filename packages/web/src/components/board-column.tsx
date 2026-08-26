@@ -18,6 +18,7 @@ import {
   type BoardColumn,
   type BoardResponseCount,
   type ColumnKind,
+  type Project,
   type Task,
   type User,
 } from "@/lib/types";
@@ -31,6 +32,12 @@ export interface ColumnProps {
   mentionCounts: Map<string, number>;
   /** Draft replies waiting per card, so a card can say it owes somebody an answer. */
   responseCounts: Map<string, BoardResponseCount>;
+  /**
+   * Only cards pointed somewhere *other* than their board's project, keyed by id.
+   * A board-wide project is a property of the board and belongs in its header;
+   * repeating it on forty cards would say nothing and hide the ones that differ.
+   */
+  projectOverrides: Map<string, Project>;
   draggingTaskId: string | null;
   /** Index the dragged card would land at, or null when this column is not the drop target. */
   dropIndex: number | null;
@@ -57,6 +64,7 @@ export function BoardColumnView({
   now,
   mentionCounts,
   responseCounts,
+  projectOverrides,
   draggingTaskId,
   dropIndex,
   onTaskDragStart,
@@ -169,6 +177,7 @@ export function BoardColumnView({
               now={now}
               openMentions={mentionCounts.get(task.id) ?? 0}
               replies={responseCounts.get(task.id)}
+              projectOverride={projectOverrides.get(task.id)}
               dragging={draggingTaskId === task.id}
               onOpen={() => onOpenTask(task.id)}
               onDragStart={(event) => {

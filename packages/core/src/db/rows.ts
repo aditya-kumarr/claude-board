@@ -28,6 +28,9 @@ import type {
   IntakeAttachmentKind,
   IntakeMessage,
   IntakeStatus,
+  Project,
+  ProjectSource,
+  ResolvedProject,
 } from "../types.ts";
 
 /** Raw snake_case shapes as they come back from bun:sqlite. */
@@ -37,10 +40,21 @@ export interface UserRow {
   kind: "human" | "agent";
   created_at: string;
 }
+export interface ProjectRow {
+  id: string;
+  name: string;
+  slug: string;
+  path: string;
+  description: string | null;
+  archived: number;
+  created_at: string;
+  updated_at: string;
+}
 export interface BoardRow {
   id: string;
   name: string;
   description: string | null;
+  project_id: string | null;
   duration_kind: string;
   starts_at: string;
   ends_at: string;
@@ -71,6 +85,7 @@ export interface TaskRow {
   position: number;
   completed_at: string | null;
   blocked_reason: string | null;
+  project_id: string | null;
   source_ref: string | null;
   created_at: string;
   updated_at: string;
@@ -205,10 +220,47 @@ export const toUser = (row: UserRow): User => ({
   createdAt: row.created_at,
 });
 
+export const toProject = (row: ProjectRow): Project => ({
+  id: row.id,
+  name: row.name,
+  slug: row.slug,
+  path: row.path,
+  description: row.description,
+  archived: row.archived === 1,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+/**
+ * Columns a card's *effective* project comes back as, from a query that joins
+ * `projects` twice — the task's and the board's. See `PROJECT_CONTEXT_COLUMNS`.
+ */
+export interface ProjectContextRow {
+  project_id: string | null;
+  project_name: string | null;
+  project_slug: string | null;
+  project_path: string | null;
+  project_description: string | null;
+  project_via: string | null;
+}
+
+export const toResolvedProject = (row: ProjectContextRow): ResolvedProject | null =>
+  row.project_id === null || row.project_via === null
+    ? null
+    : {
+        id: row.project_id,
+        name: row.project_name ?? row.project_id,
+        slug: row.project_slug ?? row.project_id,
+        path: row.project_path ?? "",
+        description: row.project_description,
+        via: row.project_via as ProjectSource,
+      };
+
 export const toBoard = (row: BoardRow): Board => ({
   id: row.id,
   name: row.name,
   description: row.description,
+  projectId: row.project_id,
   durationKind: row.duration_kind as DurationKind,
   startsAt: row.starts_at,
   endsAt: row.ends_at,
@@ -241,6 +293,7 @@ export const toTask = (row: TaskRow): Task => ({
   position: row.position,
   completedAt: row.completed_at,
   blockedReason: row.blocked_reason,
+  projectId: row.project_id,
   sourceRef: row.source_ref,
   createdAt: row.created_at,
   updatedAt: row.updated_at,

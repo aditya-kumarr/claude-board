@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Bot, Inbox, User as UserIcon } from "lucide-react";
+import { AlertTriangle, Bot, FolderGit2, Inbox, User as UserIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/misc";
 import { api } from "@/lib/api";
@@ -94,6 +94,21 @@ export function QueueView({
                     <span className="truncate">{task.boardName}</span>
                     <span className="opacity-40">·</span>
                     <span style={{ color: kindColor(task.columnKind) }}>{task.columnName}</span>
+                    {/* This list crosses boards, so which codebase a card is in is
+                        not implied by anything else on the row. */}
+                    {task.project ? (
+                      <>
+                        <span className="opacity-40">·</span>
+                        <span
+                          className="inline-flex max-w-40 items-center gap-1 truncate"
+                          style={{ color: "var(--kind-review)" }}
+                          title={task.project.path}
+                        >
+                          <FolderGit2 className="size-3 shrink-0" />
+                          {task.project.name}
+                        </span>
+                      </>
+                    ) : null}
                     {task.blockedReason ? (
                       <>
                         <span className="opacity-40">·</span>

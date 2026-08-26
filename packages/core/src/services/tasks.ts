@@ -1,17 +1,23 @@
 import type { SQLQueryBindings } from "bun:sqlite";
 import { getDb, write } from "../db/index.ts";
-import { toTask, type TaskRow } from "../db/rows.ts";
+import { toTask, toResolvedProject, type ProjectContextRow, type TaskRow } from "../db/rows.ts";
 import { buildWindow, parseDate } from "../lib/duration.ts";
 import { badRequest, conflict, notFound } from "../lib/errors.ts";
 import { newId } from "../lib/ids.ts";
 import { createLogger } from "../lib/logger.ts";
-import { PRIORITIES, type Mention, type Priority, type Task, type TaskComment } from "../types.ts";
+import { PRIORITIES, type Mention, type Priority, type ResolvedProject, type Task, type TaskComment } from "../types.ts";
 import { record } from "./activity.ts";
 import { assertDueWithinBoard, getBoard } from "./boards.ts";
 import { getColumn, listColumns, resolveColumn } from "./columns.ts";
 import { insertComment, listComments } from "./comments.ts";
 import type { ActorContext } from "./context.ts";
 import { listMentions, recordMentions } from "./mentions.ts";
+import {
+  PROJECT_CONTEXT_COLUMNS,
+  PROJECT_CONTEXT_JOIN,
+  requireProject,
+  resolveProjectForTask,
+} from "./projects.ts";
 import { getTaskResponseSummary } from "./responses.ts";
 import { positionAtIndex, positionForAppend } from "./positions.ts";
 import { requireUser } from "./users.ts";
@@ -68,6 +74,12 @@ export interface CreateTaskInput {
   dueAt?: string | null;
   blockedReason?: string | null;
   /**
+   * Directory this card's work happens in — an id, slug, name or path. Omit it and
+   * the card inherits its board's project, which is the usual case: an override is
+   * for the odd card that belongs to a different checkout than the rest of the board.
+   */
+  project?: string | null;
+  /**
    * Natural key of what this card was imported from, e.g. `outlook:AAMkAD...`.
    * Unique per board: importing the same message twice is rejected as a conflict
    * rather than producing a second card, which is what makes a sync re-runnable.
@@ -86,6 +98,7 @@ export function createTask(boardId: string, input: CreateTaskInput, actor: Actor
   const column = input.column ? resolveColumn(boardId, input.column) : columns[0]!;
 
   const assigneeId = input.assignee ? requireUser(input.assignee).id : null;
+  const projectId = input.project ? requireProject(input.project).id : null;
 
   // Unset due dates inherit the board's deadline: the board's duration *is* the
   // implicit commitment for everything on it.
@@ -126,8 +139,8 @@ export function createTask(boardId: string, input: CreateTaskInput, actor: Actor
   write((db) => {
     db.run(
       `INSERT INTO tasks (id, board_id, column_id, title, description, assignee_id, created_by, priority,
-                          due_at, position, completed_at, blocked_reason, source_ref, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          due_at, position, completed_at, blocked_reason, project_id, source_ref, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         boardId,
@@ -141,6 +154,7 @@ export function createTask(boardId: string, input: CreateTaskInput, actor: Actor
         positionForAppend(db, column.id),
         column.kind === "done" ? now : null,
         input.blockedReason?.trim() || null,
+        projectId,
         sourceRef,
         now,
         now,
@@ -152,6 +166,7 @@ export function createTask(boardId: string, input: CreateTaskInput, actor: Actor
       assignee: assigneeId,
       priority,
       dueAt,
+      project: projectId,
       sourceRef,
     });
   });
@@ -178,6 +193,11 @@ export interface UpdateTaskInput {
   priority?: Priority | string;
   dueAt?: string | null;
   blockedReason?: string | null;
+  /**
+   * `null` does not mean "no project": it clears this card's override, so the
+   * card falls back to its board's. That is the only way to un-override one.
+   */
+  project?: string | null;
 }
 
 export function updateTask(taskId: string, input: UpdateTaskInput, actor: ActorContext): Task {
@@ -224,6 +244,12 @@ export function updateTask(taskId: string, input: UpdateTaskInput, actor: ActorC
     sets.push("blocked_reason = ?");
     params.push(reason);
     changed.blockedReason = reason;
+  }
+  if (input.project !== undefined) {
+    const projectId = input.project === null ? null : requireProject(input.project).id;
+    sets.push("project_id = ?");
+    params.push(projectId);
+    changed.project = projectId;
   }
 
   if (sets.length === 0) return task;
@@ -331,6 +357,12 @@ export interface TaskWithContext extends Task {
   columnName: string;
   columnKind: string;
   overdue: boolean;
+  /**
+   * Where this card's work happens, resolved through its board. Free here — the
+   * query already joins both — and it is the field that tells a cross-board queue
+   * which codebase each line belongs to.
+   */
+  project: ResolvedProject | null;
 }
 
 /**
@@ -379,12 +411,24 @@ export function listTasks(filter: ListTasksFilter = {}): TaskWithContext[] {
 
   const limit = Math.min(Math.max(filter.limit ?? 200, 1), 1000);
   const rows = getDb()
-    .query<TaskRow & { board_name: string; board_ends_at: string; column_key: string; column_name: string; column_kind: string }, SQLQueryBindings[]>(
+    .query<
+      TaskRow &
+        ProjectContextRow & {
+          board_name: string;
+          board_ends_at: string;
+          column_key: string;
+          column_name: string;
+          column_kind: string;
+        },
+      SQLQueryBindings[]
+    >(
       `SELECT t.*, b.name AS board_name, b.ends_at AS board_ends_at,
-              c.key AS column_key, c.name AS column_name, c.kind AS column_kind
+              c.key AS column_key, c.name AS column_name, c.kind AS column_kind,
+              ${PROJECT_CONTEXT_COLUMNS}
          FROM tasks t
          JOIN boards b        ON b.id = t.board_id
          JOIN board_columns c ON c.id = t.column_id
+         ${PROJECT_CONTEXT_JOIN}
         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
         ORDER BY
           CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
@@ -403,6 +447,7 @@ export function listTasks(filter: ListTasksFilter = {}): TaskWithContext[] {
     columnName: row.column_name,
     columnKind: row.column_kind,
     overdue: row.column_kind !== "done" && row.due_at !== null && new Date(row.due_at).getTime() < now,
+    project: toResolvedProject(row),
   }));
 }
 
@@ -452,6 +497,11 @@ export function getTaskDetail(taskId: string) {
     task,
     board,
     column,
+    /**
+     * Where work on this card happens, already resolved through the board. A card
+     * that reads as "fix the duplicate button" is only actionable with it.
+     */
+    project: resolveProjectForTask(taskId),
     window: buildWindow(board.durationKind, board.startsAt, board.endsAt),
     comments: listComments(taskId),
     /** Unresolved asks in this thread — the reason to read the card right now. */

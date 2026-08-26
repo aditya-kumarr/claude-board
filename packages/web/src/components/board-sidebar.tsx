@@ -1,4 +1,4 @@
-import { Bot, LayoutGrid, Plus, Radio, ScrollText, User } from "lucide-react";
+import { Bot, FolderGit2, LayoutGrid, Plus, Radio, ScrollText, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress, Separator } from "@/components/ui/misc";
 import { Hint } from "@/components/ui/tooltip";
@@ -15,6 +15,8 @@ export function BoardSidebar({
   live,
   onSelect,
   onCreateBoard,
+  onOpenProjects,
+  projectCount,
 }: {
   boards: BoardDetail[];
   view: SidebarView;
@@ -23,6 +25,9 @@ export function BoardSidebar({
   live: boolean;
   onSelect: (view: SidebarView) => void;
   onCreateBoard: () => void;
+  /** Opens the directory register — where a card's work can be carried out. */
+  onOpenProjects: () => void;
+  projectCount: number;
 }) {
   const claudeTotal = boards.reduce((sum, board) => sum + board.stats.assignedToClaude, 0);
   const myTotal = boards.reduce((sum, board) => sum + board.stats.assignedToMe, 0);
@@ -73,6 +78,16 @@ export function BoardSidebar({
           label="Activity"
           active={view.kind === "activity"}
           onClick={() => onSelect({ kind: "activity" })}
+        />
+        {/* Not a view — a register. It sits with the navigation because a project
+            is the answer to "where does the work happen", which is board-wide. */}
+        <NavRow
+          icon={<FolderGit2 />}
+          label="Projects"
+          count={projectCount}
+          active={false}
+          tint="var(--kind-review)"
+          onClick={onOpenProjects}
         />
       </nav>
 

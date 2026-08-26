@@ -10,10 +10,41 @@ export interface User {
   createdAt: string;
 }
 
+/**
+ * A directory on the machine running the board, that work on a card can be
+ * carried out *inside*. A card with one resolved against it is a card an
+ * `@claude` request can actually fix rather than only discuss.
+ */
+export interface Project {
+  id: string;
+  name: string;
+  slug: string;
+  path: string;
+  description: string | null;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Where a card's project came from: the card names one, or its board does. */
+export type ProjectSource = "task" | "board";
+
+/** A card's effective project: its own if it has one, otherwise its board's. */
+export interface ResolvedProject {
+  id: string;
+  name: string;
+  slug: string;
+  path: string;
+  description: string | null;
+  via: ProjectSource;
+}
+
 export interface Board {
   id: string;
   name: string;
   description: string | null;
+  /** Default project for every card on this board. A card may override it. */
+  projectId: string | null;
   durationKind: DurationKind;
   startsAt: string;
   endsAt: string;
@@ -46,6 +77,11 @@ export interface Task {
   position: number;
   completedAt: string | null;
   blockedReason: string | null;
+  /**
+   * Overrides the board's project for this card. `null` is not "no project" — it
+   * means the card inherits whatever its board points at.
+   */
+  projectId: string | null;
   /** Import key when this card came from Outlook or Teams. */
   sourceRef: string | null;
   createdAt: string;
@@ -59,6 +95,8 @@ export interface TaskWithContext extends Task {
   columnName: string;
   columnKind: ColumnKind;
   overdue: boolean;
+  /** Where this card's work happens, already resolved through its board. */
+  project: ResolvedProject | null;
 }
 
 export interface TaskComment {
@@ -102,6 +140,8 @@ export interface MentionWithContext extends Mention {
   columnKey: string;
   columnName: string;
   columnKind: ColumnKind;
+  /** The directory this request will be carried out in, already resolved. */
+  project: ResolvedProject | null;
 }
 
 export type SyncSource = "outlook" | "teams";
@@ -343,6 +383,8 @@ export interface BoardWindow {
 
 export interface BoardDetail {
   board: Board;
+  /** The board's default project, resolved. */
+  project: Project | null;
   window: BoardWindow;
   columns: BoardColumn[];
   tasks: Task[];
@@ -357,6 +399,8 @@ export interface TaskDetail {
   task: Task;
   board: Board;
   column: BoardColumn;
+  /** Where work on this card happens, resolved through the board. */
+  project: ResolvedProject | null;
   window: BoardWindow;
   comments: TaskComment[];
   openMentions: MentionWithContext[];

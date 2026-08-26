@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AtSign, Ban, Check, Clock, Loader2, Pencil, Send, Sparkles, Trash2, User as UserIcon } from "lucide-react";
+import { AtSign, Ban, Check, Clock, FolderGit2, Loader2, Pencil, Send, Sparkles, Trash2, User as UserIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input, Textarea } from "@/components/ui/input";
@@ -9,6 +9,7 @@ import { Avatar, Separator } from "@/components/ui/misc";
 import { Badge } from "@/components/ui/badge";
 import { Hint } from "@/components/ui/tooltip";
 import { agentHandles, hasAgentMention, MentionText } from "@/components/mention-text";
+import { ProjectSelect, shortPath } from "@/components/project-select";
 import { ResponseBoxes } from "@/components/response-boxes";
 import { ResponsePanel } from "@/components/response-panel";
 import { api, ApiError } from "@/lib/api";
@@ -22,6 +23,7 @@ import {
   type MentionStatus,
   type MentionWithContext,
   type Priority,
+  type Project,
   type TaskComment,
   type TaskResponseSummary,
   type User,
@@ -43,6 +45,8 @@ export interface TaskDialogProps {
   taskId: string | null;
   boards: BoardDetail[];
   users: User[];
+  /** Registered directories, for the picker and for naming the inherited one. */
+  projects: Project[];
   /**
    * Moves when the revision poll sees a change made outside this tab. Draft
    * replies live off the board payload, so without this a rewrite Claude finished
@@ -63,7 +67,7 @@ export interface TaskDialogProps {
  * comment box stays live in both modes — it is the hand-off channel to Claude,
  * not an edit to the card.
  */
-export function TaskDialog({ taskId, boards, users, revisionKey, onClose, onChanged, onError }: TaskDialogProps) {
+export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClose, onChanged, onError }: TaskDialogProps) {
   const board = boards.find((entry) => entry.tasks.some((task) => task.id === taskId));
   const task = board?.tasks.find((entry) => entry.id === taskId) ?? null;
   const column = board?.columns.find((entry) => entry.id === task?.columnId) ?? null;
@@ -252,6 +256,14 @@ export function TaskDialog({ taskId, boards, users, revisionKey, onClose, onChan
 
   const open = taskId !== null && task !== null && board !== undefined && column !== null;
   const assignee = open ? users.find((user) => user.id === task.assigneeId) : undefined;
+  /**
+   * The same card-then-board fallback core does, resolved here from data the
+   * dialog already has: what matters to the user is the directory the work would
+   * happen in, not which of the two rows happens to name it.
+   */
+  const boardProject = projects.find((project) => project.id === board?.board.projectId) ?? null;
+  const taskProject = task?.projectId ? projects.find((project) => project.id === task.projectId) ?? null : null;
+  const effectiveProject = taskProject ?? boardProject;
   const overdue =
     open && column.kind !== "done" && task.dueAt !== null && new Date(task.dueAt).getTime() < Date.now();
 
@@ -398,6 +410,27 @@ export function TaskDialog({ taskId, boards, users, revisionKey, onClose, onChan
                     aria-label="Due date"
                   />
                 </Field>
+
+                <div className="space-y-1.5 sm:col-span-2">
+                  <Label hint="where the work happens">Project</Label>
+                  <ProjectSelect
+                    projects={projects}
+                    value={task.projectId}
+                    inheritFrom={boardProject}
+                    onChange={(projectId) => void patch({ project: projectId })}
+                  />
+                  <p className="text-[11px] leading-snug text-muted-foreground">
+                    {effectiveProject ? (
+                      <>
+                        An <span className="font-medium text-primary">@claude</span> request on this card runs inside{" "}
+                        <span className="font-mono text-[10.5px] text-foreground">{effectiveProject.path}</span> and can
+                        change code there.
+                      </>
+                    ) : (
+                      "With no project, Claude can answer about this card but has no codebase to work in."
+                    )}
+                  </p>
+                </div>
               </div>
             ) : (
               <dl className="grid gap-x-5 gap-y-3 sm:grid-cols-2">
@@ -440,6 +473,29 @@ export function TaskDialog({ taskId, boards, users, revisionKey, onClose, onChan
                     </span>
                   ) : (
                     <span className="text-muted-foreground">No due date</span>
+                  )}
+                </ReadField>
+
+                <ReadField label="Project">
+                  {effectiveProject ? (
+                    <Hint
+                      label={`${effectiveProject.path} — ${taskProject ? "set on this card" : "inherited from the board"}`}
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <FolderGit2 className="size-3.5 shrink-0" style={{ color: "var(--kind-review)" }} />
+                        <span className="truncate">{effectiveProject.name}</span>
+                        <span className="font-mono text-[10.5px] text-muted-foreground">
+                          {shortPath(effectiveProject.path)}
+                        </span>
+                        {taskProject && boardProject && taskProject.id !== boardProject.id ? (
+                          <Badge variant="outline">overrides the board</Badge>
+                        ) : null}
+                      </span>
+                    </Hint>
+                  ) : (
+                    <span className="inline-flex items-center gap-2 text-muted-foreground">
+                      <FolderGit2 className="size-3.5" /> None
+                    </span>
                   )}
                 </ReadField>
 
@@ -668,7 +724,9 @@ export function TaskDialog({ taskId, boards, users, revisionKey, onClose, onChan
                   )}
                 >
                   {draftAsksClaude
-                    ? "Sending this asks Claude to act on it, and tracks the request until it replies."
+                    ? effectiveProject
+                      ? `Sending this asks Claude to act on it — in ${shortPath(effectiveProject.path)} — and tracks the request until it replies.`
+                      : "Sending this asks Claude to act on it, and tracks the request until it replies."
                     : "Mentioning @claude turns a comment into a request Claude is expected to carry out."}
                 </p>
               </div>

@@ -6,9 +6,10 @@ import { Input, Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { ProjectSelect } from "@/components/project-select";
 import { api, ApiError } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
-import { DURATION_LABELS, type DurationKind } from "@/lib/types";
+import { DURATION_LABELS, type DurationKind, type Project } from "@/lib/types";
 
 const KINDS: DurationKind[] = ["day", "week", "month", "quarter", "year", "custom"];
 const DEFAULT_COLUMNS = ["To do", "Doing", "Blocked", "Needs review", "Done"];
@@ -41,10 +42,12 @@ function previewWindow(kind: DurationKind, endsAt: string): string {
 }
 
 export function CreateBoardDialog({
+  projects,
   open,
   onOpenChange,
   onCreated,
 }: {
+  projects: Project[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated: (boardId: string) => void;
@@ -55,6 +58,7 @@ export function CreateBoardDialog({
   const [endsAt, setEndsAt] = useState("");
   const [columns, setColumns] = useState<string[]>(DEFAULT_COLUMNS);
   const [newColumn, setNewColumn] = useState("");
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -67,6 +71,7 @@ export function CreateBoardDialog({
     setEndsAt("");
     setColumns(DEFAULT_COLUMNS);
     setNewColumn("");
+    setProjectId(null);
     setError(null);
   };
 
@@ -88,6 +93,7 @@ export function CreateBoardDialog({
         description: description.trim() || undefined,
         endsAt: durationKind === "custom" ? `${endsAt}T23:59:59` : undefined,
         columns: columns.length && columns.join() !== DEFAULT_COLUMNS.join() ? columns : undefined,
+        project: projectId ?? undefined,
       });
       reset();
       onOpenChange(false);
@@ -176,6 +182,14 @@ export function CreateBoardDialog({
             placeholder="Context that helps Claude pick up work from here."
             rows={2}
           />
+        </div>
+
+        {/* Asked here because this is the moment the answer is known: a board is
+            usually about one codebase, and setting it now means every card that
+            lands on it later — including from a sync or a paste — is actionable. */}
+        <div className="space-y-1.5">
+          <Label hint="optional — where its work happens">Project</Label>
+          <ProjectSelect projects={projects} value={projectId} onChange={setProjectId} ariaLabel="Board project" />
         </div>
 
         <div className="space-y-1.5">

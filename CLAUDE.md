@@ -98,6 +98,19 @@ go through `write()` or the UI will not notice it.
   costs the user a whole round trip to discover. `completeIntakeMessage` verifies the task ids it is
   given against the board: the chat renders them as links, and a reply naming cards that are not
   there reads as work having been done when it was not.
+- **A project is a directory, and a card's project is where its work happens.** `projects`
+  holds absolute paths on this machine, validated at registration (`services/projects.ts`) rather
+  than at delegation time — a typo comes back into the dialog the user is looking at instead of
+  killing an agent run half an hour later. Both `boards` and `tasks` carry a nullable
+  `project_id`, and the rule everything else leans on is one line: **a card's project is its own
+  if it names one, otherwise its board's**. Nothing is copied at creation, so re-pointing a board
+  moves every card that never overrode it, and clearing a card's project restores inheritance
+  rather than meaning "none". `PROJECT_CONTEXT_COLUMNS` takes every field from the *same* side of
+  a CASE rather than an `IFNULL` per column, or a card-level project with no description would
+  borrow its board's project's description. That resolution rides on `MentionWithContext`, which
+  is what makes it load-bearing: **an `@claude` on a card with a project is carried out inside
+  that directory**, so registering one is the act of granting an unattended run write access to
+  it — which is why it is a deliberate step in the UI and never inferred from a path in a comment.
 - **`tasks.source_ref` is what makes a sync re-runnable.** Unique per board via a partial index;
   `createTask` looks it up first so the caller gets a `conflict` naming `existingTaskId` instead
   of an opaque constraint violation or a duplicate card.
@@ -163,6 +176,13 @@ leads with a banner of queued reply changes, `board_get` marks which cards have 
 reply owed back is the point of the card, not a footnote. `response_claim` returns the instruction,
 the current message in full and the card, so one call is enough to act.
 
+`project_list` / `project_add` / `project_update` / `project_delete` register the directories work
+can be delegated into; a card or board is pointed at one through `task_update` / `board_update`'s
+`project` argument rather than a tool of its own, because attaching is an edit to the card. Every
+render that a run acts on — `board_get`, `task_get`, `mention_claim` — carries the resolved path and
+says whether the directory still exists, since a stale path is otherwise discovered only as a
+failure the model cannot diagnose.
+
 `intake_pending` / `intake_claim` / `intake_complete` are the intake tools, and `my_queue` carries a
 third banner for them. `intake_claim` is the widest job spec in the server: the pasted text in full,
 the contents of every text attachment, the on-disk path of anything needing `Read`, the board's
@@ -225,6 +245,19 @@ should only be got right once:
   took 534s to return. For the same reason the result is reported on `exit`, not `close`.
 - Because a detached run does not receive the terminal's Ctrl-C, both watchers call
   `killActiveRuns()` from their signal handlers rather than orphaning a run mid-flight.
+
+The mention watcher is the one that decides **where** a run happens. `dispatchFor()` resolves
+the card's project and returns the working directory, the tool allowlist and the timeout as one
+decision, because the three have to agree: a run given write tools but started in this repo would
+edit the wrong files, and a run started in a project but held to the read-only allowlist could
+only describe the bug it was sent to fix. With no project it is unchanged — this repo, `mcp__board
+Read Grep Glob`. With one it starts in that directory with `MENTION_WATCH_PROJECT_TOOLS` (file
+edits and `Bash`, deliberately no web tools) and a longer window, and picks up that project's own
+`CLAUDE.md` for free — which is the entire point, and why the prompt tells it where it is standing
+rather than handing it a path to go and find. `--strict-mcp-config` still applies, so the project's
+own `.mcp.json` is not reachable. A project whose directory has been moved is **not** retried: the
+run is dismissed immediately with the reason posted on the card, because a missing cwd will not fix
+itself in five seconds.
 
 `scripts/watch-responses.ts` is the strictest of the three, because rewriting a message needs the
 board and nothing else: board server only, `--strict-mcp-config`, and `mcp__board` as its entire

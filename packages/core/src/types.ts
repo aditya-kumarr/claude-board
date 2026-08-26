@@ -119,6 +119,46 @@ export type IntakeAttachmentKind = (typeof INTAKE_ATTACHMENT_KINDS)[number];
 export const USER_ME = "me";
 export const USER_CLAUDE = "claude";
 
+/**
+ * A directory on the user's machine that work can be carried out *inside*.
+ *
+ * This is the difference between an `@claude` request that can only talk about a
+ * bug and one that can go and fix it: a card with a project resolves to a real
+ * path, and the run handling it is spawned there, inheriting that repo's own
+ * CLAUDE.md and files and seeing nothing outside them.
+ */
+export interface Project {
+  id: string;
+  name: string;
+  /** Stable handle, e.g. `nexus_web`. Accepted anywhere a project id is. */
+  slug: string;
+  /** Absolute path to the directory. Never relative — see the schema comment. */
+  path: string;
+  /** What the codebase is, in the user's words. Travels in a delegated prompt. */
+  description: string | null;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Where a card's project came from: the card names one, or its board does. */
+export const PROJECT_SOURCES = ["task", "board"] as const;
+export type ProjectSource = (typeof PROJECT_SOURCES)[number];
+
+/**
+ * A card's *effective* project — its own if it names one, otherwise its board's.
+ * A subset of `Project`: everything a run needs to act, and nothing it does not.
+ */
+export interface ResolvedProject {
+  id: string;
+  name: string;
+  slug: string;
+  path: string;
+  description: string | null;
+  /** Which level supplied it, so the UI can show an override as an override. */
+  via: ProjectSource;
+}
+
 export interface User {
   id: string;
   displayName: string;
@@ -130,6 +170,11 @@ export interface Board {
   id: string;
   name: string;
   description: string | null;
+  /**
+   * Default project for every card on this board — the directory work on it
+   * happens in. A card may override it; a card that does not, inherits it live.
+   */
+  projectId: string | null;
   durationKind: DurationKind;
   startsAt: string;
   endsAt: string;
@@ -162,6 +207,11 @@ export interface Task {
   position: number;
   completedAt: string | null;
   blockedReason: string | null;
+  /**
+   * Overrides the board's project for this one card. `null` is not "no project":
+   * it means this card inherits whatever its board points at.
+   */
+  projectId: string | null;
   /**
    * Where this card was imported from, e.g. `outlook:AAMkAD...`. Unique per
    * board, so re-running a sync over the same window cannot duplicate a card.
@@ -220,6 +270,13 @@ export interface MentionWithContext extends Mention {
   columnKey: string;
   columnName: string;
   columnKind: ColumnKind;
+  /**
+   * The directory this request should be carried out in, resolved from the card
+   * and then its board. Carried here rather than looked up because it is what
+   * decides *where* the run handling this mention is spawned — the watcher must
+   * not need a second query to know that.
+   */
+  project: ResolvedProject | null;
 }
 
 /** Per-source watermark for one board. */
@@ -507,6 +564,8 @@ export interface BoardWindow {
 
 export interface BoardDetail {
   board: Board;
+  /** The board's default project, resolved, so the header can name it. */
+  project: Project | null;
   window: BoardWindow;
   columns: BoardColumn[];
   tasks: Task[];

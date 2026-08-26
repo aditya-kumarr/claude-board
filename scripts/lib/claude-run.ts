@@ -50,6 +50,17 @@ export interface RunOptions {
   model?: string;
   extraArgs?: string[];
   /**
+   * Directory the run starts in. Defaults to this repository.
+   *
+   * This is what makes delegating into a project work at all: Claude Code reads
+   * the CLAUDE.md and the files of wherever it was started, so pointing it at the
+   * checkout a card is about gives the run that codebase's context — and only
+   * that codebase's. The generated MCP config is passed as an absolute path and
+   * the board server is pinned to an absolute entrypoint, so neither follows the
+   * working directory anywhere.
+   */
+  cwd?: string;
+  /**
    * Whether the run may see *only* `mcpConfig` (`--strict-mcp-config`).
    *
    * Defaults to true, which is the right answer whenever the generated config is
@@ -104,7 +115,7 @@ export function runClaude(options: RunOptions): Promise<RunResult> {
   const started = Date.now();
   return new Promise((resolve) => {
     const child = spawn(bin, args, {
-      cwd: REPO_ROOT,
+      cwd: options.cwd ?? REPO_ROOT,
       // stdin closed: an unattended run must never block waiting on input.
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env },

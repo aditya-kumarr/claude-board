@@ -1,4 +1,4 @@
-import { AlertTriangle, Archive, AtSign, CalendarRange, Loader2, MoreHorizontal, Plus, Sparkles, Trash2 } from "lucide-react";
+import { AlertTriangle, Archive, AtSign, CalendarRange, FolderGit2, Loader2, MoreHorizontal, Plus, Sparkles, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress, Separator } from "@/components/ui/misc";
@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Hint } from "@/components/ui/tooltip";
 import { SyncButton, SyncResult } from "@/components/sync-button";
+import { shortPath } from "@/components/project-select";
 import { formatDateTime, progressPercent, remainingLabel, urgencyColor } from "@/lib/format";
 import { DURATION_LABELS, kindColor, type BoardDetail } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -31,6 +32,7 @@ export function BoardHeader({
   onSync,
   onCancelSync,
   onOpenIntake,
+  onSetProject,
   syncing,
 }: {
   detail: BoardDetail;
@@ -43,6 +45,8 @@ export function BoardHeader({
   onCancelSync: () => void;
   /** Opens the intake chat — paste raw material, get cards. */
   onOpenIntake: () => void;
+  /** Opens the picker for the directory this board's work happens in. */
+  onSetProject: () => void;
   /** True while the queue request itself is in flight. */
   syncing: boolean;
 }) {
@@ -112,6 +116,9 @@ export function BoardHeader({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuLabel>{board.id}</DropdownMenuLabel>
+              <DropdownMenuItem onSelect={onSetProject}>
+                <FolderGit2 /> {detail.project ? "Change project" : "Set a project"}
+              </DropdownMenuItem>
               <DropdownMenuItem onSelect={onArchive}>
                 <Archive /> {board.archived ? "Unarchive board" : "Archive board"}
               </DropdownMenuItem>
@@ -130,6 +137,32 @@ export function BoardHeader({
             <CalendarRange className="size-3.5" />
             {boardWindow.label}
           </span>
+        </Hint>
+
+        {/* Next to the window label: the two together are where and when this
+            board's work happens, and the path is what a delegated run acts on. */}
+        <Hint
+          label={
+            detail.project
+              ? `Cards here are worked on in ${detail.project.path} — Claude can read and change code there`
+              : "No directory set — an @claude request on these cards can only answer from the board"
+          }
+        >
+          <button
+            type="button"
+            onClick={onSetProject}
+            className={cn(
+              "inline-flex max-w-56 items-center gap-1.5 rounded-full px-1.5 py-0.5 text-xs font-medium transition-colors",
+              detail.project
+                ? "text-foreground hover:bg-muted/70"
+                : "text-muted-foreground/70 hover:bg-muted/70 hover:text-foreground",
+            )}
+          >
+            <FolderGit2 className="size-3.5 shrink-0" style={detail.project ? { color: "var(--kind-review)" } : undefined} />
+            <span className="truncate font-mono text-[11px]">
+              {detail.project ? shortPath(detail.project.path) : "no project"}
+            </span>
+          </button>
         </Hint>
 
         <div className="flex min-w-40 flex-1 items-center gap-2">

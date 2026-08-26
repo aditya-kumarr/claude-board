@@ -337,6 +337,49 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_intake_files ON intake_attachments (message_id, created_at);
     `,
   },
+  {
+    version: 6,
+    name: "projects",
+    sql: /* sql */ `
+      -- A project is a directory on the user's machine. Attaching one to a card,
+      -- or to a whole board, is what lets an @claude request be carried out
+      -- *inside that codebase*: the run is spawned with the directory as its
+      -- working directory, so it inherits that repo's CLAUDE.md and its files and
+      -- sees nothing else — enough context to fix the bug named on the card,
+      -- rather than the whole machine.
+      CREATE TABLE projects (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        -- Stable handle, so a conversation and a tool argument can both say
+        -- "nexus_web" rather than an opaque id.
+        slug        TEXT NOT NULL,
+        -- Absolute, always. A relative path resolves against whichever process
+        -- happens to read the row, which is the one way this can silently point
+        -- somewhere other than the directory the user chose.
+        path        TEXT NOT NULL,
+        -- What the codebase is, in the user's words. It travels in the prompt, so
+        -- it is the first thing a delegated run knows about where it has landed.
+        description TEXT,
+        archived    INTEGER NOT NULL DEFAULT 0,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+      );
+
+      CREATE UNIQUE INDEX idx_projects_slug ON projects (slug);
+      -- One directory is one project. Registering the same path twice would make
+      -- "which project is this card in" ambiguous for nothing in return.
+      CREATE UNIQUE INDEX idx_projects_path ON projects (path);
+
+      -- The board's default and the card's override, kept as two nullable columns
+      -- rather than stamped onto each card at creation: pointing a board at a
+      -- different checkout then moves every card that never overrode it, which is
+      -- what a default is for.
+      ALTER TABLE boards ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;
+      ALTER TABLE tasks  ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;
+
+      CREATE INDEX idx_tasks_project ON tasks (project_id);
+    `,
+  },
 ];
 
 /** Assignees exist before any board does, so both transports can reference them. */

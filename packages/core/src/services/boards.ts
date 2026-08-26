@@ -12,6 +12,7 @@ import { record } from "./activity.ts";
 import type { ActorContext } from "./context.ts";
 import { listMentions } from "./mentions.ts";
 import { getIntakeSummary } from "./intake.ts";
+import { findProject, requireProject } from "./projects.ts";
 import { countBoardResponses } from "./responses.ts";
 import { getSyncSummary } from "./sync.ts";
 
@@ -20,6 +21,12 @@ const log = createLogger("boards");
 export interface CreateBoardInput {
   name: string;
   description?: string | null;
+  /**
+   * Directory every card on this board defaults to working in — an id, slug, name
+   * or path. Cards may override it individually; those that do not inherit it as
+   * it changes, rather than taking a copy at creation.
+   */
+  project?: string | null;
   durationKind: DurationKind | string;
   /** Which day/week/month the board covers; defaults to today. */
   anchor?: string;
@@ -66,14 +73,26 @@ export function createBoard(input: CreateBoardInput, actor: ActorContext): Board
   const columnNames = input.columns?.length ? input.columns : null;
   if (columnNames && columnNames.length > 12) throw badRequest("a board supports at most 12 columns");
 
+  const projectId = input.project ? requireProject(input.project).id : null;
+
   const id = newId("brd");
   const now = new Date().toISOString();
 
   write((db) => {
     db.run(
-      `INSERT INTO boards (id, name, description, duration_kind, starts_at, ends_at, archived, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-      [id, name, input.description?.trim() || null, input.durationKind, startsAt.toISOString(), endsAt.toISOString(), now, now],
+      `INSERT INTO boards (id, name, description, project_id, duration_kind, starts_at, ends_at, archived, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      [
+        id,
+        name,
+        input.description?.trim() || null,
+        projectId,
+        input.durationKind,
+        startsAt.toISOString(),
+        endsAt.toISOString(),
+        now,
+        now,
+      ],
     );
 
     const columns = columnNames
@@ -97,6 +116,7 @@ export function createBoard(input: CreateBoardInput, actor: ActorContext): Board
       durationKind: input.durationKind,
       endsAt: endsAt.toISOString(),
       columns: columns.length,
+      project: projectId,
     });
   });
 
@@ -202,6 +222,9 @@ export function getBoardDetail(boardId: string): BoardDetail {
     .map(toTask);
   return {
     board,
+    // Resolved here rather than left as an id, so the header and the agent's
+    // board view can both name the directory without a second lookup.
+    project: findProject(board.projectId),
     window: buildWindow(board.durationKind, board.startsAt, board.endsAt),
     columns,
     tasks,
@@ -216,6 +239,8 @@ export function getBoardDetail(boardId: string): BoardDetail {
 export interface UpdateBoardInput {
   name?: string;
   description?: string | null;
+  /** `null` clears the board default; cards overriding it keep their own. */
+  project?: string | null;
   durationKind?: DurationKind | string;
   anchor?: string;
   startsAt?: string;
@@ -240,6 +265,12 @@ export function updateBoard(boardId: string, input: UpdateBoardInput, actor: Act
     sets.push("description = ?");
     params.push(description);
     changed.description = description;
+  }
+  if (input.project !== undefined) {
+    const projectId = input.project === null ? null : requireProject(input.project).id;
+    sets.push("project_id = ?");
+    params.push(projectId);
+    changed.project = projectId;
   }
 
   // Any duration change re-derives the whole window, then re-checks that no

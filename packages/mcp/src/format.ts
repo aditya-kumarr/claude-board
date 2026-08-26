@@ -1,6 +1,7 @@
 import {
   humanizeDuration,
   listComments,
+  projectPathExists,
   type ActivityEntry,
   type BoardColumn,
   type BoardDetail,
@@ -9,6 +10,8 @@ import {
   type IntakeMessageWithContext,
   type IntakeMessageWithFiles,
   type MentionWithContext,
+  type Project,
+  type ResolvedProject,
   type ResponseTurn,
   type ResponseTurnWithContext,
   type ResponseWithContext,
@@ -50,10 +53,55 @@ function taskLine(
   if (options.replies?.open) {
     parts.push(`replies=${options.replies.open}${options.replies.dueNow ? ` (${options.replies.dueNow} to send now)` : ""}`);
   }
+  // Slug only: a cross-board queue needs to know which codebase a line belongs
+  // to, and the full path belongs on the card, not on every row of a list.
+  if ("project" in task && task.project) parts.push(`project=${task.project.slug}`);
   if (options.showBoard && "boardName" in task) parts.push(`board=${task.boardName}`);
   if (options.showBoard && "columnName" in task) parts.push(`state=${task.columnName}`);
   if (task.blockedReason) parts.push(`blocked=${task.blockedReason}`);
   return parts.join("  ");
+}
+
+/**
+ * Where work on something happens, as one line.
+ *
+ * The existence check is the reason this is a function rather than a template: a
+ * directory that has been moved or deleted turns a delegated run into a failure
+ * the model cannot diagnose, so the path being wrong is said here, at the moment
+ * the model reads the card, rather than discovered later.
+ */
+function projectLine(project: ResolvedProject | Project | null | undefined, indent = ""): string | null {
+  if (!project) return null;
+  const via = "via" in project ? (project.via === "task" ? "set on this card" : "inherited from the board") : null;
+  const missing = projectPathExists(project.path) ? "" : "  !! THIS DIRECTORY DOES NOT EXIST ANY MORE";
+  return (
+    `${indent}project: ${project.slug} — ${project.path}${via ? `  (${via})` : ""}${missing}` +
+    (project.description ? `\n${indent}  what it is: ${project.description.replace(/\s+/g, " ").slice(0, 300)}` : "")
+  );
+}
+
+export function renderProjects(projects: Project[]): string {
+  if (projects.length === 0) {
+    return "No projects registered. Use project_add to point one at a directory on this machine.";
+  }
+  return [
+    `${projects.length} project(s):`,
+    "",
+    ...projects.map((project) =>
+      [
+        `  ${project.slug}  (${project.id})${project.archived ? "  [archived]" : ""}`,
+        `    name: ${project.name}`,
+        `    path: ${project.path}${projectPathExists(project.path) ? "" : "  !! MISSING"}`,
+        project.description ? `    what it is: ${project.description}` : null,
+      ]
+        .filter((line): line is string => line !== null)
+        .join("\n"),
+    ),
+    "",
+    "Attach one with board_update project=<slug> (the default for every card on a board)",
+    "or task_update project=<slug> (this card only). An @claude request on a card with a",
+    "project is carried out inside that directory.",
+  ].join("\n");
 }
 
 export function renderBoard(detail: BoardDetail, options: { includeDone?: boolean } = {}): string {
@@ -71,6 +119,7 @@ export function renderBoard(detail: BoardDetail, options: { includeDone?: boolea
     `${board.name}  (${board.id})${board.archived ? "  [archived]" : ""}`,
     `duration=${board.durationKind}  window=${window.label}  ends=${shortDate(board.endsAt)}  ${deadline}`,
     board.description ? `note: ${board.description}` : null,
+    projectLine(detail.project),
     `tasks=${stats.total}  done=${stats.done}  active=${stats.active}  blocked=${stats.blocked}  review=${stats.review}  overdue=${stats.overdue}`,
     `assigned: Claude=${stats.assignedToClaude}  Me=${stats.assignedToMe}  unassigned=${stats.unassigned}`,
     // Loud, because an unanswered @claude is the user waiting on a reply.
@@ -192,6 +241,7 @@ export function renderTaskDetail(input: {
   board: { id: string; name: string; endsAt: string; durationKind: string };
   column: BoardColumn;
   overdue: boolean;
+  project?: ResolvedProject | null;
   openMentions?: MentionWithContext[];
   responses?: TaskResponseSummary;
 }): string {
@@ -204,6 +254,10 @@ export function renderTaskDetail(input: {
     `assignee=${who(task.assigneeId)}  createdBy=${who(task.createdBy)}`,
     `due=${shortDate(task.dueAt)}${overdue ? "  OVERDUE" : ""}  completed=${task.completedAt ? shortDate(task.completedAt) : "no"}`,
     task.blockedReason ? `blockedReason=${task.blockedReason}` : null,
+    // Where the work happens. On a card like "fix the duplicate button on the
+    // facility details page", this line is the difference between a card you can
+    // act on and one you can only talk about.
+    projectLine(input.project),
     // Before the description, because an open request changes what to do with
     // everything below it.
     open.length > 0
@@ -242,6 +296,9 @@ export function renderMention(mention: MentionWithContext): string {
     `  due=${shortDate(mention.taskDueAt)}${mention.taskOverdue ? " OVERDUE" : ""}` +
       `  board="${mention.boardName}" (${mention.boardId}) closes ${shortDate(mention.boardEndsAt)}`,
     mention.taskDescription ? `  task description: ${mention.taskDescription.replace(/\s+/g, " ").slice(0, 400)}` : null,
+    // Carry the directory with the ask itself: a request to fix something is only
+    // answerable if you know which checkout it is in.
+    projectLine(mention.project, "  "),
     mention.claimedAt ? `  claimed ${shortDate(mention.claimedAt)}` : null,
   ]
     .filter((line): line is string => line !== null)

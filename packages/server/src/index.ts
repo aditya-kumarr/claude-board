@@ -10,6 +10,7 @@ import { tasksRouter } from "./routes/tasks.ts";
 import { responsesRouter } from "./routes/responses.ts";
 import { intakeMessagesRouter } from "./routes/intake.ts";
 import { metaRouter } from "./routes/meta.ts";
+import { projectsRouter } from "./routes/projects.ts";
 
 const log = createLogger("server");
 const PORT = Number(process.env.PORT ?? 4000);
@@ -28,6 +29,7 @@ export function createApp(): express.Express {
 
   app.use("/api", metaRouter);
   app.use("/api/boards", boardsRouter);
+  app.use("/api/projects", projectsRouter);
   app.use("/api/tasks", tasksRouter);
   app.use("/api/responses", responsesRouter);
   app.use("/api/intake", intakeMessagesRouter);

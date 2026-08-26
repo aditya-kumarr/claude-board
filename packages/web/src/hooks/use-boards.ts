@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "@/lib/api";
-import type { BoardDetail, User } from "@/lib/types";
+import type { BoardDetail, Project, User } from "@/lib/types";
 
 const POLL_MS = 2500;
 
@@ -15,6 +15,12 @@ const POLL_MS = 2500;
 export function useBoards() {
   const [boards, setBoards] = useState<BoardDetail[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  /**
+   * Registered directories. Fetched with the boards rather than once at mount:
+   * `createProject` bumps the same revision counter every other write does, so a
+   * project added from an MCP session shows up in the pickers on the next poll.
+   */
+  const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   /** Set when the last refresh came from a remote change rather than our own action. */
@@ -27,9 +33,14 @@ export function useBoards() {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     try {
-      const [{ boards: next }, { revision }] = await Promise.all([api.listBoards(), api.revision()]);
+      const [{ boards: next }, { projects: registered }, { revision }] = await Promise.all([
+        api.listBoards(),
+        api.listProjects(),
+        api.revision(),
+      ]);
       revisionRef.current = revision;
       setBoards(next);
+      setProjects(registered);
       setError(null);
     } catch (cause) {
       if (!options.silent) {
@@ -78,7 +89,7 @@ export function useBoards() {
     };
   }, [refresh]);
 
-  return { boards, users, loading, error, refresh, remoteChangeAt };
+  return { boards, users, projects, loading, error, refresh, remoteChangeAt };
 }
 
 /** Re-renders on an interval so "2d 4h left" counts down without a refetch. */

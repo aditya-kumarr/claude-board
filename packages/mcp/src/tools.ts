@@ -7,9 +7,11 @@ import {
   COLUMN_KINDS,
   createBoard,
   createLogger,
+  createProject,
   createTask,
   deleteBoard,
   deleteColumn,
+  deleteProject,
   deleteTask,
   DURATION_KINDS,
   getBoardDetail,
@@ -34,6 +36,7 @@ import {
   listColumns,
   listIntakeMessages,
   listMentions,
+  listProjects,
   listResponses,
   listResponseTurns,
   listSyncRuns,
@@ -43,6 +46,7 @@ import {
   PRIORITIES,
   releaseMention,
   requestResponseDrafts,
+  requireProject,
   requestSync,
   RESPONSE_CHANNELS,
   RESPONSE_STAGES,
@@ -51,6 +55,7 @@ import {
   SYNC_SOURCES,
   updateBoard,
   updateColumn,
+  updateProject,
   updateTask,
   USER_CLAUDE,
   type ActorContext,
@@ -62,6 +67,7 @@ import {
   renderColumns,
   renderMention,
   renderMentions,
+  renderProjects,
   renderIntakeMessage,
   renderIntakeQueue,
   renderResponse,
@@ -137,8 +143,93 @@ const responseStage = z.enum(RESPONSE_STAGES);
 const columnRef = z
   .string()
   .describe('Target state: column id, key ("needs_review") or name ("Needs review"). Case-insensitive.');
+const projectRef = z
+  .string()
+  .describe(
+    'A registered directory: project id, slug ("nexus_web"), name, or the absolute path itself. project_list has them.',
+  );
 
 export function registerTools(server: McpServer): void {
+  /* ---------------------------------------------------------------- projects */
+
+  server.registerTool(
+    "project_list",
+    {
+      title: "List projects",
+      description:
+        "List the directories on this machine that work can be carried out inside, with their paths. A board can name one as its default and a card can override it; a card's project is what decides where an @claude request on it is actually run. Call this when you need a slug to pass to board_update or task_update.",
+      inputSchema: {
+        includeArchived: z.boolean().optional().describe("Include archived projects. Default false."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    handler("project_list", (args: { includeArchived?: boolean }) =>
+      renderProjects(listProjects({ includeArchived: args.includeArchived })),
+    ),
+  );
+
+  server.registerTool(
+    "project_add",
+    {
+      title: "Register a project directory",
+      description:
+        "Register a directory as a project so cards can point at it. The path must already exist on this machine and be a directory — it is checked now rather than when a run is spawned in it. Registering the same directory twice is a conflict naming the existing project, not a second copy. The description travels in the prompt of every run delegated here, so write it for someone who has never seen the codebase.",
+      inputSchema: {
+        name: z.string().describe('Display name, e.g. "Nexus web".'),
+        path: z
+          .string()
+          .describe("Absolute path to the directory, or one starting with ~. Must exist."),
+        description: z
+          .string()
+          .optional()
+          .describe("What this codebase is, and anything a run landing in it should know first."),
+      },
+    },
+    handler("project_add", (args: { name: string; path: string; description?: string }, ctx) => {
+      const project = createProject(args, ctx);
+      return `Project registered: ${project.slug} → ${project.path}\n\n${renderProjects(listProjects())}`;
+    }),
+  );
+
+  server.registerTool(
+    "project_update",
+    {
+      title: "Update a project",
+      description:
+        "Rename a project, point it at a different directory, re-describe it, or archive it. A new path is checked the same way project_add checks one. Archiving hides it from the pickers without orphaning the cards already pointing at it.",
+      inputSchema: {
+        projectId: projectRef,
+        name: z.string().optional().describe("Renaming also re-derives the slug."),
+        path: z.string().optional(),
+        description: z.string().nullable().optional(),
+        archived: z.boolean().optional(),
+      },
+    },
+    handler("project_update", ({ projectId, ...patch }: { projectId: string } & Record<string, unknown>, ctx) => {
+      const project = updateProject(requireProject(projectId).id, patch, ctx);
+      return `Project updated.\n\n${renderProjects([project])}`;
+    }),
+  );
+
+  server.registerTool(
+    "project_delete",
+    {
+      title: "Unregister a project",
+      description:
+        "Remove a project from the board app. Nothing on disk is touched and no card is deleted: every board and card pointing at it is detached, and the counts come back so you can say what changed. Prefer project_update archived=true unless removal was asked for.",
+      inputSchema: { projectId: projectRef },
+      annotations: { destructiveHint: true },
+    },
+    handler("project_delete", (args: { projectId: string }, ctx) => {
+      const project = requireProject(args.projectId);
+      const result = deleteProject(project.id, ctx);
+      return (
+        `Unregistered "${project.name}" (${project.path}). The directory itself is untouched.\n` +
+        `Detached ${result.detachedBoards} board(s) and ${result.detachedTasks} card(s), which now have no project.`
+      );
+    }),
+  );
+
   /* ------------------------------------------------------------------ boards */
 
   server.registerTool(
@@ -183,6 +274,11 @@ export function registerTools(server: McpServer): void {
           .describe(
             'Custom states, left to right. Defaults to To do / Doing / Blocked / Needs review / Done. Semantic kind is inferred from each name.',
           ),
+        project: projectRef
+          .optional()
+          .describe(
+            "Directory every card on this board defaults to working in. Set it when the board is about one codebase — an @claude request on any of its cards is then carried out inside that directory.",
+          ),
       },
     },
     handler("board_create", (args: Parameters<typeof createBoard>[0], ctx) =>
@@ -222,6 +318,12 @@ export function registerTools(server: McpServer): void {
         startsAt: z.string().optional(),
         endsAt: z.string().optional(),
         archived: z.boolean().optional().describe("Archive (true) hides the board and blocks new tasks."),
+        project: projectRef
+          .nullable()
+          .optional()
+          .describe(
+            "The board's default project. null clears it; cards with their own project keep it either way.",
+          ),
       },
     },
     handler("board_update", ({ boardId, ...patch }: { boardId: string } & Record<string, unknown>, ctx) =>
@@ -353,6 +455,11 @@ export function registerTools(server: McpServer): void {
           .optional()
           .describe("ISO date/datetime inside the board window. A bare YYYY-MM-DD means end of that day."),
         blockedReason: z.string().optional().describe("Only meaningful when starting in a blocked state."),
+        project: projectRef
+          .optional()
+          .describe(
+            "Directory this card's work happens in. Omit it and the card inherits its board's project, which is usually right — set it only when this card belongs to a different codebase than the rest of the board.",
+          ),
         sourceRef: z
           .string()
           .optional()
@@ -485,6 +592,12 @@ export function registerTools(server: McpServer): void {
         priority: priority.optional(),
         dueAt: z.string().nullable().optional(),
         blockedReason: z.string().nullable().optional(),
+        project: projectRef
+          .nullable()
+          .optional()
+          .describe(
+            "Override the board's project for this card. null does not mean 'no project' — it clears the override so the card goes back to inheriting its board's.",
+          ),
       },
     },
     handler("task_update", ({ taskId, ...patch }: { taskId: string } & Record<string, unknown>, ctx) => {
@@ -574,7 +687,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Take a request",
       description:
-        "Claim one open request so a second run of you does not duplicate the work, and get everything needed to carry it out: the ask, the full card and its comment thread. Claiming an already-claimed or already-resolved request fails rather than stealing it. Claim before acting, resolve when done.",
+        "Claim one open request so a second run of you does not duplicate the work, and get everything needed to carry it out: the ask, the full card and its comment thread. If the card names a project, the reply carries that directory — that is the codebase the request is about, and the watcher spawns runs for these requests inside it. Claiming an already-claimed or already-resolved request fails rather than stealing it. Claim before acting, resolve when done.",
       inputSchema: {
         mentionId: z.string().describe("Request id from the mentions tool, e.g. men_a1b2c3d4."),
       },

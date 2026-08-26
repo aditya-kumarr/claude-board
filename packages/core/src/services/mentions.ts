@@ -1,6 +1,6 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { getDb, write } from "../db/index.ts";
-import { toMention, type MentionRow } from "../db/rows.ts";
+import { toMention, toResolvedProject, type MentionRow, type ProjectContextRow } from "../db/rows.ts";
 import { badRequest, conflict, notFound } from "../lib/errors.ts";
 import { newId } from "../lib/ids.ts";
 import { createLogger } from "../lib/logger.ts";
@@ -17,6 +17,7 @@ import {
 import { record } from "./activity.ts";
 import { insertComment } from "./comments.ts";
 import type { ActorContext } from "./context.ts";
+import { PROJECT_CONTEXT_COLUMNS, PROJECT_CONTEXT_JOIN } from "./projects.ts";
 import { listUsers, requireUser } from "./users.ts";
 
 const log = createLogger("mentions");
@@ -113,20 +114,21 @@ export function recordMentions(
   return created;
 }
 
-type MentionContextRow = MentionRow & {
-  body: string;
-  requested_by_name: string;
-  task_title: string;
-  task_description: string | null;
-  task_assignee_id: string | null;
-  task_priority: string;
-  task_due_at: string | null;
-  board_name: string;
-  board_ends_at: string;
-  column_key: string;
-  column_name: string;
-  column_kind: string;
-};
+type MentionContextRow = MentionRow &
+  ProjectContextRow & {
+    body: string;
+    requested_by_name: string;
+    task_title: string;
+    task_description: string | null;
+    task_assignee_id: string | null;
+    task_priority: string;
+    task_due_at: string | null;
+    board_name: string;
+    board_ends_at: string;
+    column_key: string;
+    column_name: string;
+    column_kind: string;
+  };
 
 /**
  * One row per mention carrying the ask, the card and the board deadline. The
@@ -146,13 +148,19 @@ const CONTEXT_SELECT = /* sql */ `
          b.ends_at              AS board_ends_at,
          c.key                  AS column_key,
          c.name                 AS column_name,
-         c.kind                 AS column_kind
+         c.kind                 AS column_kind,
+         -- The directory this request is to be carried out in, resolved card-first
+         -- then board. Joined rather than looked up per row because it is what
+         -- decides *where* the run answering the mention is spawned, and a queue
+         -- of fifty asks must not become fifty extra queries to find that out.
+         ${PROJECT_CONTEXT_COLUMNS}
     FROM task_mentions m
     JOIN task_comments cm ON cm.id = m.comment_id
     JOIN users u          ON u.id  = m.requested_by
     JOIN tasks t          ON t.id  = m.task_id
     JOIN boards b         ON b.id  = m.board_id
     JOIN board_columns c  ON c.id  = t.column_id
+    ${PROJECT_CONTEXT_JOIN}
 `;
 
 /**
@@ -181,6 +189,7 @@ function toContext(row: MentionContextRow, handles: Map<string, string>): Mentio
     columnKey: row.column_key,
     columnName: row.column_name,
     columnKind: row.column_kind as ColumnKind,
+    project: toResolvedProject(row),
   };
 }
 

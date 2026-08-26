@@ -221,13 +221,53 @@ board can queue work here**, and the Cloudflare Access policy is the thing decid
 the watcher trusts that decision. Two defaults keep the blast radius small:
 
 - the spawned run sees **only** the board MCP server — a generated `data/mention-watch.mcp.json`
-  passed with `--strict-mcp-config`, not the repo's `.mcp.json` — plus read-only file tools, so
-  it can move a card and read this codebase but cannot edit files or send mail, and
+  passed with `--strict-mcp-config`, not the repo's `.mcp.json` — so it can never send mail or
+  reach another server, and by default only read-only file tools on top of that, and
 - it starts from **now**; requests already in the queue are left alone unless you ask for them.
+
+The exception is a card with a **project** on it, which is the next section: that run starts in
+your codebase and can change it.
 
 Widen `MENTION_WATCH_ALLOWED_TOOLS` deliberately. See `.env.example` for the poll interval,
 per-run timeout, and how many attempts a request gets before the watcher gives up and says so
 on the card — because a request that fails quietly is worse than one that fails loudly.
+
+## Projects: where the work actually happens
+
+"Fix the duplicate button missing on the facility details page" is not a request this repository
+can answer. It is answerable in the checkout where that page lives — so a card can name one.
+
+A **project** is a directory on the machine running the board. Register it once from the sidebar
+(name, path, and a line on what it is), then point a board at it — every card on that board
+inherits it — or point one card somewhere else when it belongs to a different codebase:
+
+```
+Projects                  Facilities portal   ~/Code/facilities-portal
+                          Billing API         ~/Code/billing-api
+
+Board "This week"    →    Facilities portal          (the default for its cards)
+  └─ card            →    Billing API                (this one only)
+```
+
+A card's project is **its own if it names one, otherwise its board's**. Nothing is copied when a
+card is created, so re-pointing a board moves every card that never overrode it, and clearing a
+card's project puts it back to inheriting rather than to nothing.
+
+What that buys you: when you write `@claude` on a card with a project, the watcher spawns the run
+**inside that directory**. It reads that repo's own `CLAUDE.md`, its files and its conventions —
+so it starts from what the codebase actually is instead of from a description of it — and it sees
+nothing outside it. The reply lands in the card's thread naming the files it changed.
+
+> **Registering a directory is the act of granting write access to it.** A run delegated into a
+> project gets `MENTION_WATCH_PROJECT_TOOLS` — file edits and `Bash` inside that directory — so it
+> can genuinely fix the bug rather than describe it. It is told not to commit, push or open a PR
+> unless the request asked for one, so the change is waiting in the working tree for you to review.
+> Nothing infers a project from a path someone typed in a comment; it is always a deliberate step
+> in the UI or an explicit `project_add`.
+
+A project whose directory has been moved or deleted is not retried: the request is dismissed
+straight away with the reason posted on the card, because a missing directory will not fix itself
+in five seconds.
 
 ## Pulling work in from Outlook and Teams
 

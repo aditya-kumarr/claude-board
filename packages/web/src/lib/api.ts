@@ -12,6 +12,7 @@ import type {
   MentionStatus,
   MentionWithContext,
   Priority,
+  Project,
   ResponseStage,
   ResponseStatus,
   ResponseTurnWithContext,
@@ -75,6 +76,8 @@ export interface CreateBoardPayload {
   anchor?: string;
   endsAt?: string;
   columns?: string[];
+  /** Project id, slug, name or path. The default for every card on the board. */
+  project?: string | null;
 }
 
 export interface CreateTaskPayload {
@@ -84,12 +87,37 @@ export interface CreateTaskPayload {
   assignee?: string | null;
   priority?: Priority;
   dueAt?: string | null;
+  /** Overrides the board's project. `null` clears the override, it does not unset one. */
+  project?: string | null;
+}
+
+export interface ProjectPayload {
+  name: string;
+  /** Absolute path, or one starting with `~`. Checked server-side before it is stored. */
+  path: string;
+  description?: string | null;
 }
 
 export const api = {
   health: () => request<{ ok: boolean; revision: number; logFile: string; database: string }>("/health"),
   revision: () => request<{ revision: number }>("/meta/revision"),
   users: () => request<{ users: User[] }>("/users"),
+
+  /* ---- projects ----
+   * Directories on the machine running the API, not on the machine running this
+   * browser: the path is validated there, which is why an invalid one comes back
+   * as a 400 rather than being caught in the form.
+   */
+  listProjects: (includeArchived = false) =>
+    request<{ projects: Project[] }>(`/projects?includeArchived=${includeArchived}`),
+  createProject: (payload: ProjectPayload) => request<Project>("/projects", { method: "POST", ...body(payload) }),
+  updateProject: (projectId: string, patch: Partial<ProjectPayload> & { archived?: boolean }) =>
+    request<Project>(`/projects/${projectId}`, { method: "PATCH", ...body(patch) }),
+  /** Unregisters the directory. Nothing on disk is touched; cards are detached. */
+  deleteProject: (projectId: string) =>
+    request<{ id: string; detachedBoards: number; detachedTasks: number }>(`/projects/${projectId}`, {
+      method: "DELETE",
+    }),
 
   listBoards: (includeArchived = false) =>
     request<{ boards: BoardDetail[] }>(`/boards?includeArchived=${includeArchived}`),
