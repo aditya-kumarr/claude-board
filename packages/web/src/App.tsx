@@ -15,14 +15,15 @@ import { ProjectsDialog } from "@/components/projects-dialog";
 import { BoardProjectDialog } from "@/components/board-project-dialog";
 import { ColumnDialog } from "@/components/column-dialog";
 import { ActivityView, QueueView } from "@/components/queue-view";
+import { ArchiveView } from "@/components/archive-view";
 import { useBoards, useNow } from "@/hooks/use-boards";
 import { api, ApiError } from "@/lib/api";
-import type { BoardColumn, Project } from "@/lib/types";
+import type { BoardColumn, BoardDetail, Project } from "@/lib/types";
 
 const VIEW_STORAGE_KEY = "automation.view";
 
 export default function App() {
-  const { boards, users, projects, loading, error, refresh, remoteChangeAt } = useBoards();
+  const { boards, archivedBoards, allBoards, users, projects, loading, error, refresh, remoteChangeAt } = useBoards();
   const now = useNow(30_000);
 
   const [view, setView] = useState<SidebarView>(() => {
@@ -54,17 +55,20 @@ export default function App() {
     setIntakeOpen(false);
   }, [view]);
 
-  // Fall back to a sensible view when the selected board disappears.
+  // Fall back to a sensible view when the selected board disappears. Checked
+  // against every board rather than the sidebar's: an archived board is still
+  // openable from the archive, so it is deletion — not archiving — that should
+  // bounce the view.
   useEffect(() => {
     if (view.kind !== "board" || loading) return;
-    if (!boards.some((detail) => detail.board.id === view.boardId)) {
+    if (!allBoards.some((detail) => detail.board.id === view.boardId)) {
       setView(boards[0] ? { kind: "board", boardId: boards[0].board.id } : { kind: "queue", assignee: "claude" });
     }
-  }, [boards, view, loading]);
+  }, [allBoards, boards, view, loading]);
 
   const activeBoard = useMemo(
-    () => (view.kind === "board" ? boards.find((detail) => detail.board.id === view.boardId) ?? null : null),
-    [boards, view],
+    () => (view.kind === "board" ? allBoards.find((detail) => detail.board.id === view.boardId) ?? null : null),
+    [allBoards, view],
   );
 
   /**
@@ -187,29 +191,44 @@ export default function App() {
     [activeBoard, refresh, fail],
   );
 
-  const archiveBoard = useCallback(async () => {
-    if (!activeBoard) return;
-    try {
-      await api.updateBoard(activeBoard.board.id, { archived: !activeBoard.board.archived });
-      await refresh();
-      toast.success(activeBoard.board.archived ? "Board restored" : "Board archived");
-    } catch (cause) {
-      fail(cause instanceof ApiError ? cause.message : "Could not archive the board");
-    }
-  }, [activeBoard, refresh, fail]);
+  /**
+   * Takes the board it acts on rather than reading the selected one: the same
+   * action is reachable from the board menu, an expired row in the sidebar and
+   * the archive page, and only the first of those is looking at the open board.
+   */
+  const setBoardArchived = useCallback(
+    async (detail: BoardDetail, archived: boolean) => {
+      try {
+        await api.updateBoard(detail.board.id, { archived });
+        await refresh();
+        toast.success(archived ? "Board archived" : "Board restored", {
+          description: archived ? "Nothing was deleted — it is under Archive." : undefined,
+        });
+      } catch (cause) {
+        fail(cause instanceof ApiError ? cause.message : `Could not ${archived ? "archive" : "restore"} the board`);
+      }
+    },
+    [refresh, fail],
+  );
 
-  const removeBoard = useCallback(async () => {
-    if (!activeBoard) return;
-    if (!window.confirm(`Delete "${activeBoard.board.name}" and all ${activeBoard.stats.total} of its tasks?`)) return;
-    try {
-      await api.deleteBoard(activeBoard.board.id);
-      setView({ kind: "queue", assignee: "claude" });
-      await refresh();
-      toast.success("Board deleted");
-    } catch (cause) {
-      fail(cause instanceof ApiError ? cause.message : "Could not delete the board");
-    }
-  }, [activeBoard, refresh, fail]);
+  const removeBoard = useCallback(
+    async (detail: BoardDetail) => {
+      if (!window.confirm(`Delete "${detail.board.name}" and all ${detail.stats.total} of its tasks?`)) return;
+      try {
+        await api.deleteBoard(detail.board.id);
+        setView((current) =>
+          current.kind === "board" && current.boardId === detail.board.id
+            ? { kind: "queue", assignee: "claude" }
+            : current,
+        );
+        await refresh();
+        toast.success("Board deleted");
+      } catch (cause) {
+        fail(cause instanceof ApiError ? cause.message : "Could not delete the board");
+      }
+    },
+    [refresh, fail],
+  );
 
   const live = remoteChangeAt !== null && Date.now() - remoteChangeAt < 6000;
 
@@ -223,8 +242,10 @@ export default function App() {
           live={live}
           onSelect={setView}
           onCreateBoard={() => setBoardDialogOpen(true)}
+          onArchiveBoard={(detail) => void setBoardArchived(detail, true)}
           onOpenProjects={() => setProjectsDialogOpen(true)}
           projectCount={projects.length}
+          archivedCount={archivedBoards.length}
         />
 
         <main className="flex min-w-0 flex-1 flex-col">
@@ -263,6 +284,16 @@ export default function App() {
                 revisionKey={remoteChangeAt ?? boards.length}
               />
             </div>
+          ) : view.kind === "archive" ? (
+            <div className="min-h-0 flex-1 overflow-y-auto scrollbar-slim">
+              <ArchiveView
+                boards={archivedBoards}
+                now={now}
+                onOpen={(boardId) => setView({ kind: "board", boardId })}
+                onRestore={(detail) => void setBoardArchived(detail, false)}
+                onDelete={(detail) => void removeBoard(detail)}
+              />
+            </div>
           ) : activeBoard ? (
             <>
               <BoardHeader
@@ -276,8 +307,8 @@ export default function App() {
                   setEditingColumn(null);
                   setColumnDialogOpen(true);
                 }}
-                onArchive={() => void archiveBoard()}
-                onDelete={() => void removeBoard()}
+                onArchive={() => void setBoardArchived(activeBoard, !activeBoard.board.archived)}
+                onDelete={() => void removeBoard(activeBoard)}
                 onSync={() => void syncBoard()}
                 onCancelSync={() => void cancelSync()}
                 onOpenIntake={() => setIntakeOpen(true)}
@@ -301,6 +332,7 @@ export default function App() {
                       .sort((a, b) => a.position - b.position)}
                     users={users}
                     now={now}
+                    canAddTasks={!activeBoard.board.archived}
                     mentionCounts={mentionCounts}
                     responseCounts={responseCounts}
                     projectOverrides={projectOverrides}
@@ -373,7 +405,7 @@ export default function App() {
 
       <TaskDialog
         taskId={openTaskId}
-        boards={boards}
+        boards={allBoards}
         users={users}
         projects={projects}
         revisionKey={remoteChangeAt}

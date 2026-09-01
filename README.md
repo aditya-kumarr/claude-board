@@ -51,14 +51,23 @@ couple of seconds later without any websockets.
 bun install
 bun run db:seed        # optional: one example board
 bun run dev            # API on :4000 and the UI on :5173
+bun run dev:all        # the above plus all four watchers, in one terminal
 ```
 
 Then open <http://localhost:5173>.
+
+`dev` and `dev:all` are Turborepo tasks (`turbo.json`), so every process starts in parallel
+under one supervisor: one Ctrl-C stops all of them, and each line of output is prefixed with
+the task it came from. `dev` deliberately stops at the API and the UI — the four watchers
+spawn real `claude -p` runs, so starting them is a separate word you have to type.
 
 Individually:
 
 | Command | What it does |
 | --- | --- |
+| `bun run dev` | API + UI together (Turborepo) |
+| `bun run dev:all` | API + UI + all four watchers together |
+| `bun run dev:watchers` | Just the four watchers together |
 | `bun run dev:server` | Express API on `:4000` (`--watch`) |
 | `bun run dev:web` | Vite dev server on `:5173`, proxying `/api` to `:4000` |
 | `bun run mcp` | MCP server on stdio (normally launched by Claude, not by hand) |
@@ -69,12 +78,15 @@ Individually:
 | `bun run watch:sync` | Run queued Outlook/Teams syncs (see below) |
 | `bun run watch:responses` | Rewrite draft replies you asked Claude to change (see below) |
 | `bun run watch:intake` | Turn what you paste into a board's chat into cards (see below) |
-| `bun run typecheck` | `tsc --noEmit` across all four packages |
+| `bun run typecheck` | `tsc --noEmit` across all four packages, cached by Turborepo |
 | `bun run db:reset` | Delete the database and re-run migrations |
 | `bun run db:seed` | Add a sample board (skips if it already exists) |
 
 Configuration is via env vars — see `.env.example` for `PORT`, `WEB_PORT`,
-`AUTOMATION_DB_PATH`, `AUTOMATION_LOG_DIR` and `LOG_LEVEL`.
+`AUTOMATION_DB_PATH`, `AUTOMATION_LOG_DIR` and `LOG_LEVEL`. Turborepo runs tasks with a
+filtered environment, so a new env var only reaches a process once it is listed in
+`globalPassThroughEnv` in `turbo.json` — add it there at the same time you add it to
+`.env.example`, or the process will read `undefined` and fall back to its default.
 
 ## Reaching it from a phone or tablet
 
@@ -472,6 +484,26 @@ mcp__board                    read the card, rewrite the draft
 status is terminal — there is no unsending a mail that has left. The value is having the right
 words ready at the moment you need them; an unattended process able to mail your colleagues as you
 is pure downside.
+
+## When a board's time runs out
+
+Nothing disappears when a deadline passes. The board drops out of the running list in the
+sidebar into an **Expired** group underneath it, still openable, still holding whatever never
+got finished — which is usually the reason you would look at it again. Expiry is not a stored
+state, just the board's end date against the clock, so extending the window puts the board
+straight back at the top.
+
+Each expired row has an **archive** button on hover. That is the way out of the sidebar: the
+board moves to the **Archive** page in the left-hand nav, where every archived board is listed
+with its window, how long ago it closed, and how much of it got done. From there you can:
+
+- **open** one and read its cards — an archived board is read-only in the sense that matters
+  (no new cards, no paste, no sync), because those are the things the core layer refuses anyway;
+- **restore** it, which puts it back in the sidebar exactly where it was;
+- **delete** it, which is the one irreversible option here and asks first.
+
+Archiving is also in the board's own `⋯` menu, and Claude can do it over MCP with
+`board_update archived=true`. Nothing about it touches a card.
 
 ## Logs
 

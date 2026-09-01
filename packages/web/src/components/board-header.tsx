@@ -102,7 +102,9 @@ export function BoardHeader({
             onSync={onSync}
             onCancel={onCancelSync}
           />
-          <Button size="sm" onClick={onAddTask}>
+          {/* Core refuses a card on an archived board, so this is disabled rather
+              than left to fail — the archive page is now a way to open one. */}
+          <Button size="sm" onClick={onAddTask} disabled={board.archived}>
             <Plus /> New task
           </Button>
           <Button variant="outline" size="sm" onClick={onAddColumn}>

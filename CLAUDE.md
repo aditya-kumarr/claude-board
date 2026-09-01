@@ -7,6 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 bun install
 bun run dev             # API :4000 + UI :5173 together
+bun run dev:all         # the above plus all four watchers, one supervisor, one Ctrl-C
+bun run dev:watchers    # just the four watchers together
 bun run dev:server      # Express API only (bun --watch)
 bun run dev:web         # Vite only; proxies /api to :4000
 bun run typecheck       # tsc --noEmit over core, server, mcp, web
@@ -28,6 +30,29 @@ bun run mcp             # MCP server on stdio (Claude normally spawns this)
 
 There is no test runner configured. Verify changes by running the stack and exercising the
 API with `curl`, or by driving the MCP server over stdio with a small JSON-RPC script.
+
+### Turborepo
+
+`turbo.json` is the task graph. `dev`, `build` and `typecheck` are per-package tasks; `build`
+and `typecheck` are cached and ordered by `dependsOn: ["^…"]`, and `dev` is `persistent` so
+turbo holds it open instead of waiting on it. Three things about it are load-bearing:
+
+- **The watchers are root tasks (`//#watch:mentions`, …), not a package.** `scripts/` stays
+  outside the bun workspace for the reason it always has — it imports core by relative path —
+  so the tasks hang off the *root* package's own scripts and the files do not move. That is
+  what lets `dev:all` supervise the API, the UI and all four watchers as one run: one Ctrl-C
+  stops the lot, and every line of output is prefixed with the task that wrote it.
+- **`dev` does not start the watchers.** A watcher spawns real `claude -p` runs, so it is
+  `dev:all` that starts them — a deliberate word, not the default of the command you type all
+  day.
+- **Turbo filters the environment.** Task env is strict, so anything the processes read must be
+  listed in `globalPassThroughEnv` (wildcards allowed, hence `MENTION_WATCH_*` and friends).
+  Adding a knob to `.env.example` without adding it there means the process silently reads
+  `undefined` and takes its default. Pass-through rather than `globalEnv` because these are
+  runtime knobs that must not invalidate the build/typecheck cache.
+
+None of these tasks are marked `interactive`: turbo refuses an interactive task when stdout is
+not a TTY, which would break `bun run dev` under `nohup`, a pipe or CI.
 
 ## Architecture
 
@@ -240,6 +265,16 @@ should only be got right once:
   tools (`…__outlook_email_search`, `…__teams_list_chats`, …) rather than the `mcp__claude_ai_Microsoft_365`
   prefix. Allowing the prefix would also hand an unattended run `outlook_send_mail` and
   `outlook_forward_mail`. Keep that list read-only.
+- **`CLAUDE_CONFIG_DIR` is unset in the child, not inherited.** That variable picks the
+  `.claude.json` the CLI reads, and that file carries the *account* — so it decides which
+  claude.ai connectors exist. A `CLAUDE_CONFIG_DIR` exported in a shell profile therefore
+  silently chooses whose Outlook a sync reads, and a config dir holding a second account has no
+  Microsoft 365 connector at all. From inside the run that is indistinguishable from an outage:
+  it can only report "no Outlook/Teams tools", never "wrong account" — which is why the sync
+  watcher's banner prints the resolved account and config dir. `WATCH_CLAUDE_CONFIG_DIR` picks a
+  non-default one deliberately. Note that *unsetting* it is not the same as setting it to `~`:
+  when it is exported the CLI also looks for credentials beside the config file, so pinning the
+  default path by value yields `Not logged in` from an account that is signed in.
 - Runs are spawned `detached` in their own process group and killed as a group. Signalling only
   the run leaves its MCP servers alive holding its stdout pipe, which is how a 300s timeout once
   took 534s to return. For the same reason the result is reported on `exit`, not `close`.
@@ -307,3 +342,15 @@ shadcn-style primitives in `components/ui/`. Colours come from CSS variables onl
 
 Drag-and-drop is native HTML5 (no dnd library). The drop index is computed from the pointer's
 position against each card's midpoint in `board-column.tsx`.
+
+**Expired and archived are different things, and the sidebar says so.** A board whose `endsAt`
+has passed drops into the sidebar's own *Expired* group — nothing is written to say so, it is
+the board's `endsAt` against the clock, so extending a window brings it straight back up. The
+group carries a per-row archive button, which is the only way out of the list short of deleting.
+*Archived* is the stored flag, and those boards live on the `archive` view (`archive-view.tsx`)
+with restore and delete. `useBoards` therefore fetches `includeArchived=true` and splits the two
+lists itself rather than having the archive page poll separately, which is also what keeps the
+sidebar's archive count honest. An archived board is **openable** from there — `App`'s
+board-not-found fallback checks `allBoards`, so it is deletion and not archiving that bounces the
+view — and reading one is the point of keeping it, so the header and columns disable only what
+core would refuse anyway (a new card, a paste, a sync).

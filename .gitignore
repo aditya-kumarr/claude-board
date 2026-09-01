@@ -14,3 +14,4 @@ data/sync-watch.mcp.json
 data/response-watch.mcp.json
 data/intake-watch.mcp.json
 data/intake/
+.turbo/

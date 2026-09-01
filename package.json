@@ -3,18 +3,21 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "bun@1.3.2",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "dev": "bun run --filter '*' dev",
-    "dev:server": "bun run --cwd packages/server dev",
-    "dev:web": "bun run --cwd packages/web dev",
+    "dev": "turbo run dev",
+    "dev:all": "turbo run dev watch:mentions watch:sync watch:responses watch:intake",
+    "dev:watchers": "turbo run watch:mentions watch:sync watch:responses watch:intake",
+    "dev:server": "turbo run dev --filter=@automation/server",
+    "dev:web": "turbo run dev --filter=@automation/web",
     "mcp": "bun run --cwd packages/mcp start",
-    "build": "bun run --cwd packages/web build",
-    "serve": "bun run build && bun run --cwd packages/server start",
+    "build": "turbo run build",
+    "serve": "turbo run build && bun run --cwd packages/server start",
     "tunnel": "bun scripts/tunnel.ts",
-    "typecheck": "bun x tsc --noEmit -p packages/core && bun x tsc --noEmit -p packages/server && bun x tsc --noEmit -p packages/mcp && bun x tsc --noEmit -p packages/web",
+    "typecheck": "turbo run typecheck",
     "db:reset": "rm -f data/board.db data/board.db-wal data/board.db-shm && bun run --cwd packages/server migrate",
     "db:seed": "bun run --cwd packages/server seed",
     "watch:mentions": "bun scripts/watch-mentions.ts",
@@ -24,6 +27,7 @@
   },
   "devDependencies": {
     "@types/bun": "^1.3.2",
+    "turbo": "^2.10.12",
     "typescript": "^5.7.3"
   }
 }

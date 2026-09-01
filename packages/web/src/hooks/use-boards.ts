@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import type { BoardDetail, Project, User } from "@/lib/types";
 
@@ -11,9 +11,14 @@ const POLL_MS = 2500;
  * mutations as HTTP traffic. Instead we poll a cheap monotonic `revision`
  * counter and only refetch the boards when it moves — which is how a card
  * Claude moved appears here within a couple of seconds without websockets.
+ *
+ * Archived boards are fetched with the rest and split out here rather than
+ * loaded by the archive page on its own: the split is the only difference
+ * between the two lists, and one request keeps the archive count in the sidebar
+ * honest without a second poll.
  */
 export function useBoards() {
-  const [boards, setBoards] = useState<BoardDetail[]>([]);
+  const [allBoards, setAllBoards] = useState<BoardDetail[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   /**
    * Registered directories. Fetched with the boards rather than once at mount:
@@ -34,12 +39,12 @@ export function useBoards() {
     inFlightRef.current = true;
     try {
       const [{ boards: next }, { projects: registered }, { revision }] = await Promise.all([
-        api.listBoards(),
+        api.listBoards(true),
         api.listProjects(),
         api.revision(),
       ]);
       revisionRef.current = revision;
-      setBoards(next);
+      setAllBoards(next);
       setProjects(registered);
       setError(null);
     } catch (cause) {
@@ -89,7 +94,18 @@ export function useBoards() {
     };
   }, [refresh]);
 
-  return { boards, users, projects, loading, error, refresh, remoteChangeAt };
+  /** Live boards, in the order the API returned them (soonest deadline first). */
+  const boards = useMemo(() => allBoards.filter((detail) => !detail.board.archived), [allBoards]);
+  /** Most recently closed first — an archive is read backwards from now. */
+  const archivedBoards = useMemo(
+    () =>
+      allBoards
+        .filter((detail) => detail.board.archived)
+        .sort((a, b) => new Date(b.board.endsAt).getTime() - new Date(a.board.endsAt).getTime()),
+    [allBoards],
+  );
+
+  return { boards, archivedBoards, allBoards, users, projects, loading, error, refresh, remoteChangeAt };
 }
 
 /** Re-renders on an interval so "2d 4h left" counts down without a refetch. */

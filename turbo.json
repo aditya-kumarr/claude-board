@@ -1,0 +1,42 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "ui": "tui",
+  "globalDependencies": ["tsconfig.base.json", ".env"],
+  "globalPassThroughEnv": [
+    "PORT",
+    "HOST",
+    "WEB_PORT",
+    "LOG_LEVEL",
+    "AUTOMATION_DB_PATH",
+    "AUTOMATION_LOG_DIR",
+    "AUTOMATION_INTAKE_DIR",
+    "TUNNEL_HOSTNAME",
+    "WATCH_CLAUDE_CONFIG_DIR",
+    "TUNNEL_NAME",
+    "MENTION_WATCH_*",
+    "SYNC_WATCH_*",
+    "RESPONSE_WATCH_*",
+    "INTAKE_WATCH_*",
+    "ANTHROPIC_*",
+    "CLAUDE_*"
+  ],
+  "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "env": ["NODE_ENV"],
+      "outputs": ["dist/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "outputs": []
+    },
+    "//#watch:mentions": { "cache": false, "persistent": true },
+    "//#watch:sync": { "cache": false, "persistent": true },
+    "//#watch:responses": { "cache": false, "persistent": true },
+    "//#watch:intake": { "cache": false, "persistent": true }
+  }
+}

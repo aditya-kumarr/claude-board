@@ -13,9 +13,42 @@
  */
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export const REPO_ROOT = new URL("../..", import.meta.url).pathname;
+
+/**
+ * Which Claude account a spawned run signs in as, or undefined for the CLI default.
+ *
+ * `CLAUDE_CONFIG_DIR` picks the `.claude.json` the CLI reads, and that file is what
+ * carries the account — and therefore which claude.ai connectors exist. Inheriting
+ * whatever the launching shell happened to export silently decides whose Outlook a
+ * sync reads, which is not a thing a shell profile should get a vote on: a
+ * `CLAUDE_CONFIG_DIR` pointing at a second account is indistinguishable from a
+ * connector outage, because the run just reports it has no Microsoft 365 tools.
+ * So it is pinned here, for the same reason `boardServer()` pins `AUTOMATION_DB_PATH`
+ * rather than inheriting it.
+ *
+ * Undefined means *unset the variable in the child*, which is not the same as setting
+ * it to `~`: with it exported the CLI also looks for credentials beside the config
+ * file, so pinning the default path by value gets "Not logged in · Please run /login"
+ * from an account that is in fact signed in. Only genuine absence restores the default.
+ *
+ * Set `WATCH_CLAUDE_CONFIG_DIR` to deliberately choose a non-default account.
+ */
+export const CLAUDE_CONFIG_DIR = process.env.WATCH_CLAUDE_CONFIG_DIR?.trim() || undefined;
+
+/** The config dir a run will actually read, for messages a human reads. */
+export const effectiveConfigDir = (): string => CLAUDE_CONFIG_DIR ?? homedir();
+
+/** Child env with the account pinned — the inherited value removed unless one was chosen. */
+function runEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  if (CLAUDE_CONFIG_DIR) env.CLAUDE_CONFIG_DIR = CLAUDE_CONFIG_DIR;
+  else delete env.CLAUDE_CONFIG_DIR;
+  return env;
+}
 
 export interface McpServerSpec {
   command: string;
@@ -118,7 +151,8 @@ export function runClaude(options: RunOptions): Promise<RunResult> {
       cwd: options.cwd ?? REPO_ROOT,
       // stdin closed: an unattended run must never block waiting on input.
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env },
+      // Pinned, not inherited — see CLAUDE_CONFIG_DIR above.
+      env: runEnv(),
       // Its own process group. A Claude run starts MCP servers as grandchildren,
       // and signalling only the run leaves those alive holding its stdout pipe —
       // which is how a 300s timeout took 534s to come back and left orphaned

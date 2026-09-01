@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "bun src/index.ts",
-    "watch": "bun --watch src/index.ts"
+    "watch": "bun --watch src/index.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@automation/core": "workspace:*",

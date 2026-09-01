@@ -7,7 +7,8 @@
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "migrate": "bun -e 'import(\"@automation/core\").then(m => m.getDb())'",
-    "seed": "bun src/seed.ts"
+    "seed": "bun src/seed.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@automation/core": "workspace:*",

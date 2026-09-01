@@ -25,6 +25,8 @@
  * downside. It gets no file tools at all either, and never advances a watermark
  * itself — core does that, and only when the run reports it read the whole window.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   cancelSyncRun,
   completeSyncRun,
@@ -36,7 +38,14 @@ import {
   type ActorContext,
   type SyncRunWithContext,
 } from "../packages/core/src/index.ts";
-import { argsFromEnv, boardServer, killActiveRuns, runClaude, writeMcpConfig } from "./lib/claude-run.ts";
+import {
+  argsFromEnv,
+  boardServer,
+  effectiveConfigDir,
+  killActiveRuns,
+  runClaude,
+  writeMcpConfig,
+} from "./lib/claude-run.ts";
 
 const log = createLogger("sync-watch");
 
@@ -49,6 +58,8 @@ const CLAUDE_BIN = process.env.SYNC_WATCH_CLAUDE_BIN?.trim() || "claude";
 const MODEL = process.env.SYNC_WATCH_MODEL?.trim() || "";
 /** Prefix of the claude.ai Microsoft 365 connector's tools. */
 const MS365_PREFIX = process.env.SYNC_WATCH_MS365_PREFIX?.trim() || "mcp__claude_ai_Microsoft_365";
+/** How the connector names itself, for messages a human reads. */
+const MS365_SERVER = MS365_PREFIX.replace(/^mcp__/, "").replace(/_/g, " ").trim() || "Microsoft 365";
 
 /**
  * The read half of the Microsoft 365 connector. Listed one tool at a time on
@@ -80,6 +91,18 @@ const THROTTLE_COOLDOWN_MS = Number(process.env.SYNC_WATCH_THROTTLE_COOLDOWN_MS 
 const watcher: ActorContext = { actorId: USER_CLAUDE, source: "system" };
 
 const say = (message: string) => process.stderr.write(`${message}\n`);
+
+/** Whose claude.ai account the pinned config dir signs runs in as, for the banner. */
+function claudeAccount(): string {
+  try {
+    const config = JSON.parse(readFileSync(join(effectiveConfigDir(), ".claude.json"), "utf8")) as {
+      oauthAccount?: { emailAddress?: string };
+    };
+    return config.oauthAccount?.emailAddress ?? "not signed in";
+  } catch {
+    return "unknown (no .claude.json there)";
+  }
+}
 
 function buildPrompt(run: SyncRunWithContext): string {
   const scope = run.scope.map((entry) => `${entry.source} since ${entry.since}`).join(", ");
@@ -217,6 +240,10 @@ say(`  claude binary : ${CLAUDE_BIN}${MODEL ? ` (model ${MODEL})` : ""}`);
 say(`  allowed tools : ${ALLOWED_TOOLS}`);
 say(`  mcp config    : ${mcpConfig} (board pinned; merged with your own config, not strict)`);
 say(`  microsoft 365 : your claude.ai connector, read tools only`);
+// The connector belongs to an account, and the account is decided by this directory.
+// Print it: "no Microsoft 365 tools" and "signed in as the wrong account" look identical
+// from inside a run, and this is the line that tells them apart.
+say(`  claude account: ${claudeAccount()} (config dir ${effectiveConfigDir()})`);
 say(`  poll / timeout: ${INTERVAL_MS}ms / ${Math.round(TIMEOUT_MS / 1000)}s per run`);
 say(`  throttle hold : ${Math.round(THROTTLE_COOLDOWN_MS / 1000)}s after Graph reports a rate limit`);
 say(`  mode          : ${DRY_RUN ? "DRY RUN — nothing is spawned" : ONCE ? "one pass" : "watching"}`);

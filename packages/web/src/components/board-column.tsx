@@ -48,6 +48,8 @@ export interface ColumnProps {
   onDragLeaveColumn: (columnId: string) => void;
   onOpenTask: (taskId: string) => void;
   onAddTask: (columnId: string) => void;
+  /** False on an archived board, which core refuses new cards on. */
+  canAddTasks?: boolean;
   onRenameColumn: (column: BoardColumn) => void;
   onDeleteColumn: (column: BoardColumn) => void;
 }
@@ -74,6 +76,7 @@ export function BoardColumnView({
   onDragLeaveColumn,
   onOpenTask,
   onAddTask,
+  canAddTasks = true,
   onRenameColumn,
   onDeleteColumn,
 }: ColumnProps) {
@@ -116,9 +119,11 @@ export function BoardColumnView({
         </span>
 
         <Hint label={`Add a task to ${column.name}`}>
-          <Button variant="ghost" size="icon-sm" onClick={() => onAddTask(column.id)} aria-label={`Add task to ${column.name}`}>
-            <Plus />
-          </Button>
+          {canAddTasks ? (
+            <Button variant="ghost" size="icon-sm" onClick={() => onAddTask(column.id)} aria-label={`Add task to ${column.name}`}>
+              <Plus />
+            </Button>
+          ) : null}
         </Hint>
 
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
