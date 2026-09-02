@@ -68,12 +68,16 @@ export function SyncButton({ sync, disabled, pressing, now, onSync, onCancel }: 
         : `${scope} sync in progress, started ${relativeTime(activeRun.startedAt ?? activeRun.createdAt)}.`;
     }
 
-    const lines = sources.map(
-      (state) =>
-        `${SYNC_SOURCE_LABELS[state.source]}: ${
-          state.syncedThrough ? `read through ${relativeTime(state.syncedThrough)}` : "never synced"
-        }`,
-    );
+    const lines = sources.map((state) => {
+      const read = state.syncedThrough ? `read through ${relativeTime(state.syncedThrough)}` : "never synced";
+      // A resting source is the difference between "Teams found nothing" and
+      // "Teams was not looked at", which is the whole reason to say it here.
+      const rest =
+        state.cooldownUntil && new Date(state.cooldownUntil).getTime() > now
+          ? ` — resting after a rate limit, back ${relativeTime(state.cooldownUntil)}`
+          : "";
+      return `${SYNC_SOURCE_LABELS[state.source]}: ${read}${rest}`;
+    });
     if (lastRun) {
       const when = relativeTime(lastRun.finishedAt ?? lastRun.createdAt);
       const incomplete = sources.filter((state) => state.lastStatus === "failed").map((state) => SYNC_SOURCE_LABELS[state.source]);
@@ -87,9 +91,13 @@ export function SyncButton({ sync, disabled, pressing, now, onSync, onCancel }: 
         );
       }
     }
-    lines.push("Reads only what arrived since the last successful sync.");
+    lines.push(
+      "Reads only what arrived since the last successful sync. Teams is scanned on a slower cadence than",
+      "mail — one Teams scan costs about fifty Microsoft Graph calls, so pressing this repeatedly would",
+      "only earn a rate limit.",
+    );
     return lines.join("\n");
-  }, [activeRun, lastRun, sources]);
+  }, [activeRun, lastRun, sources, now]);
 
   const result = outcome(sync);
   // Only a run that achieved nothing marks the button itself as a problem.

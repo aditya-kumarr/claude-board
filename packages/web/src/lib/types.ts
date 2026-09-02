@@ -156,12 +156,24 @@ export interface BoardSyncState {
   lastStatus: "ok" | "failed" | null;
   lastDetail: string | null;
   imported: number;
+  /** When a source throttled by Graph may be scanned again. Null means now. */
+  cooldownUntil: string | null;
   updatedAt: string;
 }
 
 export interface SyncScopeEntry {
   source: SyncSource;
   since: string;
+  /** Watermark skipped past when the source's lookback cap moved `since` forward. */
+  cappedFrom?: string;
+}
+
+/** A source deliberately left out of a run, and when it comes back. */
+export interface SyncSkip {
+  source: SyncSource;
+  reason: "cooldown" | "interval";
+  nextEligibleAt: string;
+  detail: string;
 }
 
 export interface SyncRun {

@@ -7,6 +7,7 @@ import { createLogger } from "../lib/logger.ts";
 import { parseDate } from "../lib/duration.ts";
 import {
   OPEN_SYNC_STATUSES,
+  SYNC_SOURCE_OUTCOMES,
   SYNC_SOURCES,
   type BoardSyncState,
   type BoardSyncSummary,
@@ -14,6 +15,8 @@ import {
   type SyncRun,
   type SyncRunWithContext,
   type SyncScopeEntry,
+  type SyncSkip,
+  type SyncSourceOutcome,
   type SyncSource,
   type SyncStatus,
 } from "../types.ts";
@@ -42,6 +45,58 @@ const log = createLogger("sync");
 /** How far back a board with no watermark yet will look. */
 const DEFAULT_LOOKBACK_DAYS = 14;
 const DAY_MS = 86_400_000;
+const MINUTE_MS = 60_000;
+
+const envMs = (name: string, fallback: number): number => {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+};
+const envDays = (name: string, fallback: number): number => {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 1 ? value : fallback;
+};
+
+/**
+ * What each source costs to read, expressed as how often it is worth reading.
+ *
+ * Outlook has a real server-side search: one filtered query, paged, cheap enough
+ * that scanning it on every press of the button is free. Teams does not — see the
+ * note on `board_sync_state.cooldown_until` — so a Teams scan is ~50 Graph calls
+ * that cost the same however narrow the window, and pressing Sync three times in
+ * a row is three of them into the same rate limit.
+ *
+ * So the two sources are not read on the same cadence. `minIntervalMs` is the
+ * floor between *attempts* at a source, which is what makes repeated presses of
+ * one button safe; `maxLookbackDays` caps how wide a window is ever requested,
+ * which stops a repeatedly-throttled source's window growing without bound and
+ * keeps the ask inside what the connector can actually return.
+ */
+const SOURCE_POLICY: Record<SyncSource, { minIntervalMs: number; maxLookbackDays: number }> = {
+  outlook: {
+    minIntervalMs: envMs("SYNC_OUTLOOK_MIN_INTERVAL_MS", 0),
+    maxLookbackDays: envDays("SYNC_OUTLOOK_MAX_LOOKBACK_DAYS", 14),
+  },
+  teams: {
+    minIntervalMs: envMs("SYNC_TEAMS_MIN_INTERVAL_MS", 2 * 60 * MINUTE_MS),
+    maxLookbackDays: envDays("SYNC_TEAMS_MAX_LOOKBACK_DAYS", 3),
+  },
+};
+
+/**
+ * How long a source rests after a run reports it was throttled. Longer than the
+ * ordinary interval: a 429 says the budget is already spent, so the next attempt
+ * would buy nothing.
+ */
+const THROTTLE_COOLDOWN_MS = envMs("SYNC_THROTTLE_COOLDOWN_MS", 30 * MINUTE_MS);
+
+/**
+ * Whether some text is a rate limit rather than a real failure. Lives here so
+ * the watcher and the completion path agree on what counts — a run that says
+ * "429" in its detail but forgets `sourceStatus: throttled` should still earn the
+ * cooldown, or the next press walks straight back into the wall.
+ */
+export const looksThrottled = (text: string | null | undefined): boolean =>
+  /429|throttl|rate.?limit|too many requests/i.test(text ?? "");
 
 /**
  * The board fields a sync needs, read directly rather than through `getBoard`.
@@ -82,34 +137,105 @@ export function getSyncStates(boardId: string): BoardSyncState[] {
         lastStatus: null,
         lastDetail: null,
         imported: 0,
+        cooldownUntil: null,
         updatedAt: "",
       },
   );
 }
 
+export interface ResolveSinceOptions {
+  explicitSince?: string;
+  lookbackDays?: number;
+}
+
 /**
- * Where the next scan of `source` should start.
+ * Where the next scan of `source` should start, and whether that skipped past a
+ * watermark to get there.
  *
  * A board that has never synced falls back to its own window start — the board is
  * time-boxed, so its window is the natural scope of "what is pending for this" —
  * clamped to `DEFAULT_LOOKBACK_DAYS` so pointing a Sync button at a year-long
  * board does not try to read a year of mail.
+ *
+ * A *stored* watermark is then clamped too, by the source's `maxLookbackDays`.
+ * That is the one place this deliberately gives up completeness, so it is worth
+ * being plain about why: a source that keeps failing never advances its
+ * watermark, so its window widens every day, and for Teams a wider window is not
+ * merely slower — the connector answers a date-filtered chat search by walking
+ * the most recent messages of each chat, so messages older than that are
+ * unreachable no matter what `since` says. Asking for them anyway buys a run that
+ * cannot succeed and a window that grows for ever. The clamp is reported through
+ * `cappedFrom` rather than made quietly, because a skipped span is a real gap.
  */
-export function resolveSince(
+export function resolveScopeEntry(
   boardId: string,
   source: SyncSource,
-  options: { explicitSince?: string; lookbackDays?: number } = {},
-): string {
+  options: ResolveSinceOptions = {},
+): SyncScopeEntry {
   const board = syncBoard(boardId);
   const state = getSyncStates(boardId).find((entry) => entry.source === source);
 
-  if (options.explicitSince) return parseDate(options.explicitSince, "since").toISOString();
-  if (state?.syncedThrough) return state.syncedThrough;
+  // An explicit window is the caller overriding the policy on purpose; honour it.
+  if (options.explicitSince) {
+    return { source, since: parseDate(options.explicitSince, "since").toISOString() };
+  }
 
-  const lookbackDays = Math.max(options.lookbackDays ?? DEFAULT_LOOKBACK_DAYS, 1);
+  if (state?.syncedThrough) {
+    const cap = Date.now() - SOURCE_POLICY[source].maxLookbackDays * DAY_MS;
+    if (new Date(state.syncedThrough).getTime() >= cap) return { source, since: state.syncedThrough };
+    return { source, since: new Date(cap).toISOString(), cappedFrom: state.syncedThrough };
+  }
+
+  const lookbackDays = Math.min(
+    Math.max(options.lookbackDays ?? DEFAULT_LOOKBACK_DAYS, 1),
+    SOURCE_POLICY[source].maxLookbackDays,
+  );
   const floor = Date.now() - lookbackDays * DAY_MS;
   const boardStart = new Date(board.startsAt).getTime();
-  return new Date(Math.max(boardStart, floor)).toISOString();
+  return { source, since: new Date(Math.max(boardStart, floor)).toISOString() };
+}
+
+/** The start of the next scan of `source`. See `resolveScopeEntry` for the rest. */
+export function resolveSince(boardId: string, source: SyncSource, options: ResolveSinceOptions = {}): string {
+  return resolveScopeEntry(boardId, source, options).since;
+}
+
+/**
+ * Whether `source` may be scanned now, and if not, when.
+ *
+ * Two reasons to wait, kept apart because they read differently to a user: a
+ * `cooldown` is this source having been throttled, and an `interval` is it simply
+ * having been read recently enough that reading it again would spend a Graph
+ * budget to learn nothing.
+ */
+function eligibility(state: BoardSyncState): SyncSkip | null {
+  const now = Date.now();
+
+  if (state.cooldownUntil && new Date(state.cooldownUntil).getTime() > now) {
+    return {
+      source: state.source,
+      reason: "cooldown",
+      nextEligibleAt: state.cooldownUntil,
+      detail: `${state.source} was throttled by Microsoft Graph and is resting until ${state.cooldownUntil}`,
+    };
+  }
+
+  const { minIntervalMs } = SOURCE_POLICY[state.source];
+  if (minIntervalMs > 0 && state.lastRunAt) {
+    const nextAt = new Date(state.lastRunAt).getTime() + minIntervalMs;
+    if (nextAt > now) {
+      return {
+        source: state.source,
+        reason: "interval",
+        nextEligibleAt: new Date(nextAt).toISOString(),
+        detail:
+          `${state.source} was last read at ${state.lastRunAt}; it is scanned at most every ` +
+          `${Math.round(minIntervalMs / MINUTE_MS)} min because each scan costs ~50 Graph calls`,
+      };
+    }
+  }
+
+  return null;
 }
 
 export function getSyncRun(runId: string): SyncRun {
@@ -210,12 +336,24 @@ export interface RequestSyncInput {
   /** Override the watermark for this run only; does not change stored state. */
   since?: string;
   lookbackDays?: number;
+  /**
+   * Scan a source even if it is resting. The escape hatch for "read Teams now
+   * anyway" — deliberate, and not what the button does, because the resting is
+   * the whole mechanism that keeps a repeated press off the rate limit.
+   */
+  force?: boolean;
 }
 
 export interface RequestSyncResult {
   run: SyncRun;
   /** True when a request was already outstanding and this call returned that one. */
   alreadyQueued: boolean;
+  /**
+   * Sources deliberately left out of this run and when they come back. Never
+   * silent: a Sync that quietly skipped Teams is indistinguishable from one that
+   * read it and found nothing.
+   */
+  skipped: SyncSkip[];
 }
 
 /**
@@ -228,15 +366,33 @@ export function requestSync(boardId: string, input: RequestSyncInput, actor: Act
   if (board.archived) throw conflict("cannot sync an archived board", { boardId });
 
   const existing = listSyncRuns({ boardId, status: OPEN_SYNC_STATUSES, oldestFirst: true, limit: 1 })[0];
-  if (existing) return { run: existing, alreadyQueued: true };
+  if (existing) return { run: existing, alreadyQueued: true, skipped: [] };
 
   const requested = input.sources?.length ? input.sources.map(requireSource) : [...SYNC_SOURCES];
-  const sources = [...new Set(requested)];
+  const asked = [...new Set(requested)];
 
-  const scope: SyncScopeEntry[] = sources.map((source) => ({
-    source,
-    since: resolveSince(boardId, source, { explicitSince: input.since, lookbackDays: input.lookbackDays }),
-  }));
+  // Drop the sources that are resting before resolving windows, so a run is
+  // never queued for work it should not do. Outlook has no interval and is only
+  // ever held back by an actual throttle, so the ordinary press still reads mail.
+  const states = new Map(getSyncStates(boardId).map((state) => [state.source, state]));
+  const skipped: SyncSkip[] = [];
+  const sources: SyncSource[] = [];
+  for (const source of asked) {
+    const skip = input.force ? null : eligibility(states.get(source)!);
+    if (skip) skipped.push(skip);
+    else sources.push(source);
+  }
+
+  if (sources.length === 0) {
+    throw conflict(
+      `nothing to scan: ${skipped.map((entry) => entry.detail).join("; ")}`,
+      { boardId, skipped, retryAfter: skipped.map((entry) => entry.nextEligibleAt).sort()[0] },
+    );
+  }
+
+  const scope: SyncScopeEntry[] = sources.map((source) =>
+    resolveScopeEntry(boardId, source, { explicitSince: input.since, lookbackDays: input.lookbackDays }),
+  );
   // Stamped now, not at completion: anything arriving while the run is in flight
   // stays above the watermark and is picked up next time rather than skipped.
   const cutoff = new Date().toISOString();
@@ -254,6 +410,8 @@ export function requestSync(boardId: string, input: RequestSyncInput, actor: Act
       sources,
       since,
       cutoff,
+      skipped: skipped.map((entry) => ({ source: entry.source, reason: entry.reason })),
+      capped: scope.filter((entry) => entry.cappedFrom).map((entry) => entry.source),
     });
   });
 
@@ -261,13 +419,14 @@ export function requestSync(boardId: string, input: RequestSyncInput, actor: Act
     runId: id,
     boardId,
     sources,
+    skipped,
     since,
     cutoff,
     actor: actor.actorId,
     source: actor.source,
     requestId: actor.requestId,
   });
-  return { run: getSyncRun(id), alreadyQueued: false };
+  return { run: getSyncRun(id), alreadyQueued: false, skipped };
 }
 
 /**
@@ -304,8 +463,13 @@ export interface CompleteSyncInput {
    * another was not — Graph throttles Teams far more readily than mail. Only the
    * sources marked `ok` advance their watermark, so the half that failed is
    * re-read next run while the half that succeeded is not re-scanned.
+   *
+   * `throttled` is `failed` plus a reason: the watermark is held back exactly the
+   * same way, and the source additionally rests for `SYNC_THROTTLE_COOLDOWN_MS`
+   * so the next press does not spend a fresh budget on the same wall. Say it
+   * whenever Graph returned a 429 or the connector reported partial results.
    */
-  sourceStatus?: Partial<Record<SyncSource, Extract<SyncStatus, "ok" | "failed">>>;
+  sourceStatus?: Partial<Record<SyncSource, SyncSourceOutcome>>;
   /**
    * Cards created, per source — `{ outlook: 2, teams: 0 }`. A bare number is
    * accepted only when the run scanned a single source; spreading one total
@@ -371,24 +535,43 @@ export function completeSyncRun(runId: string, input: CompleteSyncInput, actor: 
   const { perSource, total } = attributeImported(run.scope, input.imported);
 
   // Resolve each scanned source's own outcome, defaulting to the run's.
-  const statusBySource = new Map<SyncSource, "ok" | "failed">();
+  const outcomeBySource = new Map<SyncSource, SyncSourceOutcome>();
   for (const entry of run.scope) {
     const named = input.sourceStatus?.[entry.source];
-    if (named !== undefined && named !== "ok" && named !== "failed") {
-      throw badRequest(`sourceStatus.${entry.source} must be ok or failed`, { received: named });
+    if (named !== undefined && !SYNC_SOURCE_OUTCOMES.includes(named)) {
+      throw badRequest(`sourceStatus.${entry.source} must be one of ${SYNC_SOURCE_OUTCOMES.join(", ")}`, {
+        received: named,
+      });
     }
-    statusBySource.set(entry.source, named ?? status);
+    // A run that describes a 429 in its detail but reports a plain `failed` still
+    // means the budget is spent. Believe the description: the cost of missing it
+    // is the next press walking into the same limit.
+    const inferred = named ?? status;
+    // Attributable only when there is no doubt which source it was: a run that
+    // scanned one thing, or a detail that names this one. Guessing on a two-source
+    // run would rest Outlook for a limit Teams hit.
+    const attributable = run.scope.length === 1 || detail.toLowerCase().includes(entry.source);
+    outcomeBySource.set(
+      entry.source,
+      inferred === "failed" && attributable && looksThrottled(detail) ? "throttled" : inferred,
+    );
   }
   for (const key of Object.keys(input.sourceStatus ?? {})) {
-    if (!statusBySource.has(requireSource(key))) {
+    if (!outcomeBySource.has(requireSource(key))) {
       throw badRequest(`this run did not scan ${key}`, { sources: run.scope.map((entry) => entry.source) });
     }
   }
+  // `throttled` is a failure with a reason attached, so it lands the same way
+  // everywhere the watermark is concerned.
+  const statusBySource = new Map<SyncSource, "ok" | "failed">(
+    [...outcomeBySource].map(([source, outcome]) => [source, outcome === "ok" ? "ok" : "failed"]),
+  );
   // The run reads as successful only if every source it took on succeeded — a
   // partial read must not look complete in the history.
   const overall: "ok" | "failed" = [...statusBySource.values()].every((value) => value === "ok") ? "ok" : "failed";
 
   const finishedAt = new Date().toISOString();
+  const cooldownUntil = new Date(Date.now() + THROTTLE_COOLDOWN_MS).toISOString();
   write((db) => {
     db.run("UPDATE sync_runs SET status = ?, imported = ?, detail = ?, finished_at = ? WHERE id = ?", [
       overall,
@@ -399,9 +582,10 @@ export function completeSyncRun(runId: string, input: CompleteSyncInput, actor: 
     ]);
 
     for (const entry of run.scope) {
+      const outcome = outcomeBySource.get(entry.source)!;
       db.run(
-        `INSERT INTO board_sync_state (board_id, source, synced_through, last_run_at, last_status, last_detail, imported, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO board_sync_state (board_id, source, synced_through, last_run_at, last_status, last_detail, imported, cooldown_until, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (board_id, source) DO UPDATE SET
            -- Only a successful run may move the watermark.
            synced_through = CASE WHEN excluded.last_status = 'ok' THEN excluded.synced_through ELSE synced_through END,
@@ -409,15 +593,20 @@ export function completeSyncRun(runId: string, input: CompleteSyncInput, actor: 
            last_status    = excluded.last_status,
            last_detail    = excluded.last_detail,
            imported       = imported + excluded.imported,
+           -- A throttle sets the rest; anything else clears it, so a source that
+           -- read cleanly is immediately available again rather than serving out
+           -- a penalty for a limit that has plainly lifted.
+           cooldown_until = excluded.cooldown_until,
            updated_at     = excluded.updated_at`,
         [
           run.boardId,
           entry.source,
-          statusBySource.get(entry.source) === "ok" ? run.cutoff : null,
+          outcome === "ok" ? run.cutoff : null,
           finishedAt,
           statusBySource.get(entry.source)!,
           detail,
-          statusBySource.get(entry.source) === "ok" ? (perSource.get(entry.source) ?? 0) : 0,
+          outcome === "ok" ? (perSource.get(entry.source) ?? 0) : 0,
+          outcome === "throttled" ? cooldownUntil : null,
           finishedAt,
         ],
       );
@@ -426,7 +615,7 @@ export function completeSyncRun(runId: string, input: CompleteSyncInput, actor: 
     record(db, actor, "sync.completed", { boardId: run.boardId }, {
       runId,
       status: overall,
-      sourceStatus: Object.fromEntries(statusBySource),
+      sourceStatus: Object.fromEntries(outcomeBySource),
       imported: Object.fromEntries(perSource),
       detail,
       advanced: [...statusBySource.entries()].filter(([, value]) => value === "ok").map(([key]) => key),
@@ -437,7 +626,8 @@ export function completeSyncRun(runId: string, input: CompleteSyncInput, actor: 
     runId,
     boardId: run.boardId,
     status: overall,
-    sourceStatus: Object.fromEntries(statusBySource),
+    sourceStatus: Object.fromEntries(outcomeBySource),
+    cooldownUntil: [...outcomeBySource.values()].includes("throttled") ? cooldownUntil : null,
     imported: Object.fromEntries(perSource),
     total,
     cutoff: run.cutoff,

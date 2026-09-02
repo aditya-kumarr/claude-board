@@ -18,7 +18,7 @@ import { ActivityView, QueueView } from "@/components/queue-view";
 import { ArchiveView } from "@/components/archive-view";
 import { useBoards, useNow } from "@/hooks/use-boards";
 import { api, ApiError } from "@/lib/api";
-import type { BoardColumn, BoardDetail, Project } from "@/lib/types";
+import { SYNC_SOURCE_LABELS, type BoardColumn, type BoardDetail, type Project } from "@/lib/types";
 
 const VIEW_STORAGE_KEY = "automation.view";
 
@@ -139,12 +139,21 @@ export default function App() {
     if (!activeBoard) return;
     setSyncing(true);
     try {
-      const { run, alreadyQueued } = await api.requestSync(activeBoard.board.id);
+      const { run, alreadyQueued, skipped } = await api.requestSync(activeBoard.board.id);
       const scope = run.scope.map((entry) => entry.source).join(" + ");
+      // A source left out is worth a sentence. Teams is read on a slower cadence
+      // than mail because one Teams scan costs ~50 Microsoft Graph calls, so a
+      // press that reads only Outlook is normal — but silence about it reads as
+      // Teams having been checked and found empty.
+      const held = skipped.map((entry) => SYNC_SOURCE_LABELS[entry.source]).join(" and ");
       toast.success(alreadyQueued ? "Already queued" : `Sync queued for ${scope}`, {
         description: alreadyQueued
           ? "A sync for this board is already waiting to run."
-          : "Claude reads your Outlook and Teams since the last sync and adds what is still outstanding.",
+          : held
+            ? `Reading ${scope} since the last sync. ${held} was read recently and is resting — ${
+                skipped[0]!.reason === "cooldown" ? "it hit a rate limit" : "it is scanned less often than mail"
+              }, so this press leaves it alone.`
+            : "Claude reads your Outlook and Teams since the last sync and adds what is still outstanding.",
       });
       await refresh();
     } catch (error) {

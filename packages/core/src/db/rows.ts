@@ -119,6 +119,7 @@ export interface SyncStateRow {
   last_status: string | null;
   last_detail: string | null;
   imported: number;
+  cooldown_until: string | null;
   updated_at: string;
 }
 export interface SyncRunRow {
@@ -330,6 +331,7 @@ export const toSyncState = (row: SyncStateRow): BoardSyncState => ({
   lastStatus: row.last_status as "ok" | "failed" | null,
   lastDetail: row.last_detail,
   imported: row.imported,
+  cooldownUntil: row.cooldown_until,
   updatedAt: row.updated_at,
 });
 

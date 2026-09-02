@@ -28,6 +28,9 @@ const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /** Short local date; the time is shown only when it is not an end-of-day deadline. */
+/** Now, as an ISO string, for the string comparisons the timestamps here allow. */
+const nowIso = (): string => new Date().toISOString();
+
 export function shortDate(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -171,16 +174,28 @@ function syncLine(sync: BoardSyncSummary): string | null {
       .join("+")} — ${sync.activeRun.status === "pending" ? "call sync_claim to run it" : "already claimed"}`;
   }
   const synced = sync.sources.filter((state) => state.syncedThrough !== null);
-  if (synced.length === 0) return "inbox sync: never run for this board";
+  const resting = sync.sources.filter((state) => state.cooldownUntil && state.cooldownUntil > nowIso());
+  const rest = resting.length
+    ? ` — ${resting.map((state) => state.source).join(" and ")} resting after a rate limit until ${shortDate(
+        resting.map((state) => state.cooldownUntil!).sort().at(-1)!,
+      )}, so a sync now skips it`
+    : "";
+  if (synced.length === 0) return `inbox sync: never run for this board${rest}`;
   return `inbox sync: ${synced
     .map((state) => `${state.source} through ${shortDate(state.syncedThrough)}${state.lastStatus === "failed" ? " (last run FAILED)" : ""}`)
-    .join(", ")}`;
+    .join(", ")}${rest}`;
 }
 
 export function renderSyncRun(run: SyncRunWithContext): string {
   return [
     `${run.id}  [${run.status}]  board="${run.boardName}" (${run.boardId})`,
-    `  scope: ${run.scope.map((entry) => `${entry.source} since ${shortDate(entry.since)}`).join(", ")}`,
+    `  scope: ${run.scope
+      .map(
+        (entry) =>
+          `${entry.source} since ${shortDate(entry.since)}` +
+          (entry.cappedFrom ? ` (capped; unread since ${shortDate(entry.cappedFrom)} is not retrievable)` : ""),
+      )
+      .join(", ")}`,
     `  cutoff: ${shortDate(run.cutoff)} — becomes the new watermark only if this run succeeds`,
     `  board window: ${shortDate(run.boardStartsAt)} to ${shortDate(run.boardEndsAt)} [${run.boardDurationKind}]`,
     run.boardDescription ? `  board note: ${run.boardDescription}` : null,
@@ -205,6 +220,12 @@ export function renderSyncState(sync: BoardSyncSummary): string {
         `  lastRun=${state.lastRunAt ? shortDate(state.lastRunAt) : "—"}` +
         `  lastStatus=${state.lastStatus ?? "—"}  importedTotal=${state.imported}`,
     );
+    if (state.cooldownUntil && state.cooldownUntil > nowIso()) {
+      lines.push(
+        `           RESTING until ${shortDate(state.cooldownUntil)} after a rate limit — an ordinary` +
+          ` sync_request leaves this source out; sync_request force:true overrides that`,
+      );
+    }
     if (state.lastDetail) lines.push(`           last detail: ${state.lastDetail}`);
   }
   if (sync.activeRun) lines.push(`  outstanding request: ${sync.activeRun.id} [${sync.activeRun.status}]`);

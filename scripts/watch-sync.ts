@@ -33,10 +33,13 @@ import {
   createLogger,
   getDb,
   getSyncRun,
+  getSyncStates,
   listSyncRuns,
+  looksThrottled,
   USER_CLAUDE,
   type ActorContext,
   type SyncRunWithContext,
+  type SyncSource,
 } from "../packages/core/src/index.ts";
 import {
   argsFromEnv,
@@ -65,12 +68,21 @@ const MS365_SERVER = MS365_PREFIX.replace(/^mcp__/, "").replace(/_/g, " ").trim(
  * The read half of the Microsoft 365 connector. Listed one tool at a time on
  * purpose: allowing the server wholesale would also hand an unattended run
  * `outlook_send_mail` and `outlook_forward_mail`.
+ *
+ * `teams_list_chats` is deliberately NOT here, and it is the one omission that is
+ * about cost rather than safety. A date-filtered `chat_message_search` already
+ * spans every chat the user is in — the connector answers it by walking ~50 chats
+ * itself — so enumerating chats first and searching them one by one reads the same
+ * mail several times over and is the reliable way to earn a 429. The prompt says
+ * so, but a prompt is advice and an allowlist is not, and this is exactly the kind
+ * of thoroughness a model drifts into. Chat ids for `recipientRef` come out of the
+ * search results. Restore it through `SYNC_WATCH_ALLOWED_TOOLS` if a run ever
+ * genuinely needs the listing.
  */
 const MS365_READ_TOOLS = [
   "get_me",
   "outlook_email_search",
   "chat_message_search",
-  "teams_list_chats",
   "outlook_calendar_search",
   "read_resource",
 ];
@@ -80,12 +92,6 @@ const ALLOWED_TOOLS =
   process.env.SYNC_WATCH_ALLOWED_TOOLS?.trim() ||
   ["mcp__board", ...MS365_READ_TOOLS.map((tool) => `${MS365_PREFIX}__${tool}`)].join(" ");
 const EXTRA_ARGS = argsFromEnv(process.env.SYNC_WATCH_CLAUDE_ARGS);
-/**
- * Quiet period after a run reports throttling, before another is dispatched.
- * Graph's limits are per-mailbox, so following a 429 immediately with a fresh run
- * spends the next window's budget on the same wall.
- */
-const THROTTLE_COOLDOWN_MS = Number(process.env.SYNC_WATCH_THROTTLE_COOLDOWN_MS ?? 180_000);
 
 /** The watcher's own writes are automation, not the model speaking. */
 const watcher: ActorContext = { actorId: USER_CLAUDE, source: "system" };
@@ -117,10 +123,12 @@ function buildPrompt(run: SyncRunWithContext): string {
     "the rules for what counts as a task — follow those rules rather than improvising, and read only",
     "inside the window it gives you.",
     "",
-    "Then read the sources with the Microsoft 365 tools you have — outlook_email_search for mail,",
-    "teams_list_chats and chat_message_search for Teams — restricting each to the window above.",
-    "Create a card per genuine outstanding item with task_create (always passing sourceRef so a",
-    "repeat sync cannot duplicate it).",
+    "Then read the sources with the Microsoft 365 tools you have — outlook_email_search for mail, and",
+    "for Teams ONE chat_message_search with afterDateTime/beforeDateTime set to the window, paged with",
+    "offset. That one call already spans every chat: do not list chats and do not search chat by chat,",
+    "because a date-filtered chat search is answered by walking ~50 chats internally, so extra passes",
+    "are what trip the rate limit. Create a card per genuine outstanding item with task_create (always",
+    "passing sourceRef so a repeat sync cannot duplicate it).",
     "",
     "Then, for each card you create, draft the reply the user owes with response_draft — two per",
     "person who needs an answer: stage=acknowledge to send now, stage=completion to send once the",
@@ -137,11 +145,13 @@ function buildPrompt(run: SyncRunWithContext): string {
     "    board's watermark, so a premature ok silently loses everything you did not read.",
     "  - If the Microsoft 365 tools error or report no access, complete the run with status=failed",
     "    and say exactly what they said. Do not try to authenticate — nobody is here to help.",
-    "  - Microsoft Graph throttles (HTTP 429). You CANNOT wait it out: you have no timer, no sleep and no",
-    "    shell. Saying you will retry shortly just ends this run with the request still open, which the",
-    "    user sees as a failure having banked nothing. Call sync_complete straight away with sourceStatus",
-    "    instead — the throttled source failed, anything you finished ok. The ok half keeps its progress",
-    "    and only the failed half is re-read.",
+    "  - Microsoft Graph throttles (HTTP 429), Teams sooner than mail. You CANNOT wait it out: you have no",
+    "    timer, no sleep and no shell. Saying you will retry shortly just ends this run with the request",
+    "    still open, which the user sees as a failure having banked nothing. Call sync_complete straight",
+    '    away with sourceStatus instead — the throttled source `throttled`, anything you finished `ok`.',
+    "    The ok half keeps its progress, only the rest is re-read, and `throttled` additionally rests that",
+    "    source so the next press does not walk into the same limit. A partial-results note from the Teams",
+    "    search counts as throttled too: the window was not fully read.",
     "  - Complete the run even if you import nothing. An unfinished run leaves the board showing a",
     "    sync that never ends.",
     "  - You are unattended: there is no one to ask. When an item is genuinely ambiguous, skip it and",
@@ -149,16 +159,38 @@ function buildPrompt(run: SyncRunWithContext): string {
   ].join("\n");
 }
 
-/** Reads like a rate limit rather than a real failure. */
-const throttled = (text: string): boolean => /429|throttl|rate.?limit|too many requests/i.test(text);
+/**
+ * Sources resting after a throttle, and until when.
+ *
+ * Core already records a cooldown per (board, source) and leaves a resting source
+ * out of the next request, which handles the ordinary case. This map exists for
+ * the case core cannot see: Graph's limits belong to the *mailbox*, so a board
+ * that just got a 429 on Teams has spent the budget for every other board's Teams
+ * too. Mirroring core's cooldown across boards is what stops a queue of several
+ * boards taking turns hitting the same wall.
+ *
+ * Held per source rather than globally, because the old blanket hold also stopped
+ * Outlook — which was never the source being throttled.
+ */
+const holdUntil = new Map<SyncSource, number>();
 
-/** Earliest time another run may be dispatched. */
-let dispatchAfter = 0;
+const heldSources = (): SyncSource[] =>
+  [...holdUntil].filter(([, until]) => until > Date.now()).map(([source]) => source);
 
-function holdOff(): void {
-  dispatchAfter = Date.now() + THROTTLE_COOLDOWN_MS;
-  log.warn("throttled by Microsoft Graph; holding off", { seconds: Math.round(THROTTLE_COOLDOWN_MS / 1000) });
-  say(`  … throttled by Microsoft Graph — waiting ${Math.round(THROTTLE_COOLDOWN_MS / 1000)}s before the next run`);
+/**
+ * Mirrors whatever cooldown core just recorded for this board into the map above.
+ * Core is the source of truth — the run reported the throttle to it, not to us.
+ */
+function mirrorCooldowns(boardId: string): void {
+  for (const state of getSyncStates(boardId)) {
+    if (!state.cooldownUntil) continue;
+    const until = new Date(state.cooldownUntil).getTime();
+    if (until <= Date.now()) continue;
+    if ((holdUntil.get(state.source) ?? 0) >= until) continue;
+    holdUntil.set(state.source, until);
+    log.warn("source throttled; holding it off across boards", { source: state.source, until: state.cooldownUntil });
+    say(`  … ${state.source} throttled by Microsoft Graph — resting until ${state.cooldownUntil}`);
+  }
 }
 
 /** Runs one queued sync and makes sure it cannot be left spinning. */
@@ -199,7 +231,7 @@ async function handle(run: SyncRunWithContext, mcpConfig: string): Promise<void>
         partial ? `partial (${after.imported} imported)` : after.status
       } in ${result.seconds}s — ${after.detail ?? ""}`,
     );
-    if (throttled(after.detail ?? "")) holdOff();
+    mirrorCooldowns(run.boardId);
     return;
   }
 
@@ -215,15 +247,22 @@ async function handle(run: SyncRunWithContext, mcpConfig: string): Promise<void>
   const detail =
     `The automated run did not finish (${result.seconds}s). Nothing was skipped — this window will be ` +
     `re-read next time.${hint} Last output: ${result.summary.slice(0, 600)}`;
+  // A run that died never told core anything, so a 429 in its output would
+  // otherwise be lost — and losing it means the next press walks straight back
+  // into the limit. Attribute it to every source the run was carrying, since
+  // there is nothing left to say which one it was.
+  const sourceStatus = looksThrottled(result.summary)
+    ? Object.fromEntries(run.scope.map((entry) => [entry.source, "throttled" as const]))
+    : undefined;
   try {
-    completeSyncRun(run.id, { status: "failed", detail }, watcher);
+    completeSyncRun(run.id, { status: "failed", sourceStatus, detail }, watcher);
   } catch {
     // Only reachable if it went terminal between the read above and here.
     cancelSyncRun(run.id, "automated run ended without completing", watcher);
   }
   log.warn("sync run ended without completing", { runId: run.id, seconds: result.seconds, summary: result.summary });
   say(`  ✗ did not finish; marked failed, watermark unchanged`);
-  if (throttled(result.summary) || throttled(detail)) holdOff();
+  mirrorCooldowns(run.boardId);
 }
 
 // --- main loop ---------------------------------------------------------------
@@ -245,7 +284,8 @@ say(`  microsoft 365 : your claude.ai connector, read tools only`);
 // from inside a run, and this is the line that tells them apart.
 say(`  claude account: ${claudeAccount()} (config dir ${effectiveConfigDir()})`);
 say(`  poll / timeout: ${INTERVAL_MS}ms / ${Math.round(TIMEOUT_MS / 1000)}s per run`);
-say(`  throttle hold : ${Math.round(THROTTLE_COOLDOWN_MS / 1000)}s after Graph reports a rate limit`);
+say(`  throttle hold : per source, mirrored from the cooldown core records on a 429`);
+say(`  teams         : one date-filtered chat search per run, never a per-chat walk`);
 say(`  mode          : ${DRY_RUN ? "DRY RUN — nothing is spawned" : ONCE ? "one pass" : "watching"}`);
 say("");
 say("  Runs here read your mail and Teams messages. They cannot send mail, post to Teams,");
@@ -253,11 +293,20 @@ say("  or touch the filesystem.");
 say("");
 
 async function pass(): Promise<void> {
-  if (Date.now() < dispatchAfter) return;
   const pending = listSyncRuns({ status: "pending", oldestFirst: true, limit: 20 });
   for (const run of pending) {
-    if (stopping || Date.now() < dispatchAfter) return;
+    if (stopping) return;
     if (inFlight.has(run.id)) continue;
+
+    // A run queued before the throttle can still name a resting source. Hold it
+    // only when there is nothing else in its scope worth reading — a mixed run
+    // is dispatched, because the Outlook half is real work and the Teams half
+    // just re-reports the limit.
+    const held = heldSources();
+    if (held.length > 0 && run.scope.every((entry) => held.includes(entry.source))) {
+      log.debug("holding run; every source in scope is resting", { runId: run.id, held });
+      continue;
+    }
 
     if (DRY_RUN) {
       say(`\n--- would spawn for ${run.id} ---\n${buildPrompt(run)}\n`);

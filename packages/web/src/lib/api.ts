@@ -18,6 +18,7 @@ import type {
   ResponseTurnWithContext,
   ResponseWithContext,
   SyncRun,
+  SyncSkip,
   TaskResponse,
   TaskResponseSummary,
   SyncSource,
@@ -134,9 +135,16 @@ export const api = {
    * Queues a sync — it does not perform one. The API cannot reach Microsoft
    * Graph; an agent run picks the request up. `alreadyQueued` means a request was
    * outstanding and this call returned that one instead of stacking a second.
+   *
+   * `skipped` names sources left out because they are resting — Teams is read at
+   * most every couple of hours, and longer after a rate limit. Show it: a sync
+   * that quietly dropped Teams looks just like one that read it and found nothing.
    */
-  requestSync: (boardId: string, payload: { sources?: SyncSource[]; since?: string; lookbackDays?: number } = {}) =>
-    request<{ run: SyncRun; alreadyQueued: boolean }>(`/boards/${boardId}/sync`, {
+  requestSync: (
+    boardId: string,
+    payload: { sources?: SyncSource[]; since?: string; lookbackDays?: number; force?: boolean } = {},
+  ) =>
+    request<{ run: SyncRun; alreadyQueued: boolean; skipped: SyncSkip[] }>(`/boards/${boardId}/sync`, {
       method: "POST",
       ...body(payload),
     }),

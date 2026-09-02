@@ -380,6 +380,25 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_tasks_project ON tasks (project_id);
     `,
   },
+  {
+    version: 7,
+    name: "sync_source_cooldown",
+    sql: /* sql */ `
+      -- Microsoft Graph throttles Teams far harder than mail, and the reason is
+      -- structural rather than bad luck: a date-filtered chat search has no
+      -- server-side endpoint behind it, so the connector falls back to walking
+      -- every chat the user is in. One "search since Tuesday" is ~50 Graph calls,
+      -- and it costs the same whether the window is an hour or a fortnight.
+      --
+      -- A 429 therefore is not a transient blip to retry into; it means the next
+      -- attempt will spend the fresh budget on the same wall. This column is when
+      -- the source may be scanned again, so a throttle is remembered across a
+      -- watcher restart instead of living in one process's memory, and a Sync
+      -- press can read Outlook — which was never the problem — while leaving
+      -- Teams alone.
+      ALTER TABLE board_sync_state ADD COLUMN cooldown_until TEXT;
+    `,
+  },
 ];
 
 /** Assignees exist before any board does, so both transports can reference them. */

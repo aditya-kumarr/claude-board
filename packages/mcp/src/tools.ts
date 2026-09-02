@@ -53,6 +53,8 @@ import {
   RESPONSE_STATUSES,
   resolveMention,
   SYNC_SOURCES,
+  SYNC_SOURCE_OUTCOMES,
+  type SyncSourceOutcome,
   updateBoard,
   updateColumn,
   updateProject,
@@ -823,18 +825,36 @@ export function registerTools(server: McpServer): void {
           .max(365)
           .optional()
           .describe("How far back to look when this board has never synced. Default 14."),
+        force: z
+          .boolean()
+          .optional()
+          .describe(
+            "Scan a source even if it is resting. Teams is read at most every couple of hours, and rests longer after a 429, because one date-filtered chat search costs ~50 Graph calls — so a source left out of an ordinary request is deliberate. Pass this only when the user explicitly asks to check Teams right now.",
+          ),
       },
     },
     handler(
       "sync_request",
-      (args: { boardId: string; sources?: string[]; since?: string; lookbackDays?: number }, ctx) => {
+      (
+        args: { boardId: string; sources?: string[]; since?: string; lookbackDays?: number; force?: boolean },
+        ctx,
+      ) => {
         const { boardId, ...input } = args;
-        const { run, alreadyQueued } = requestSync(boardId, input, ctx);
-        return (
-          `${alreadyQueued ? "A sync was already queued for this board." : "Sync queued."}\n\n` +
-          `${renderSyncRun(listSyncRuns({ boardId, limit: 50 }).find((entry) => entry.id === run.id)!)}\n\n` +
-          `Next step: sync_claim ${run.id}.`
-        );
+        const { run, alreadyQueued, skipped } = requestSync(boardId, input, ctx);
+        return [
+          alreadyQueued ? "A sync was already queued for this board." : "Sync queued.",
+          // Never silent: a request that quietly dropped Teams looks exactly like
+          // one that read it and found nothing.
+          ...skipped.map(
+            (entry) =>
+              `Left out: ${entry.detail}. It comes back at ${entry.nextEligibleAt}` +
+              `${entry.reason === "cooldown" ? "" : " — pass force to scan it now anyway"}.`,
+          ),
+          "",
+          renderSyncRun(listSyncRuns({ boardId, limit: 50 }).find((entry) => entry.id === run.id)!),
+          "",
+          `Next step: sync_claim ${run.id}.`,
+        ].join("\n");
       },
     ),
   );
@@ -851,7 +871,15 @@ export function registerTools(server: McpServer): void {
       const run = claimSyncRun(args.runId, ctx);
       const board = getBoardDetail(run.boardId);
       const windows = run.scope
-        .map((entry) => `  - ${entry.source}: everything from ${entry.since} up to ${run.cutoff}`)
+        .map(
+          (entry) =>
+            `  - ${entry.source}: everything from ${entry.since} up to ${run.cutoff}` +
+            (entry.cappedFrom
+              ? `\n      NOTE: this window was capped. ${entry.source} is unread since ${entry.cappedFrom}, but the\n` +
+                `      connector cannot return messages that old, so ${entry.since} is the honest start. Say in\n` +
+                `      sync_complete that the span before it was skipped, so the user can check it themselves.`
+              : ""),
+        )
         .join("\n");
 
       return [
@@ -869,18 +897,29 @@ export function registerTools(server: McpServer): void {
             "           subject and sender are not enough to judge whether it is a task."
           : null,
         run.scope.some((entry) => entry.source === "teams")
-          ? "  teams:   list your chats, then search messages within the window (e.g. teams_list_chats plus\n" +
-            "           chat_message_search, or list-chats plus list-chat-messages)."
+          ? "  teams:   ONE chat_message_search call, with afterDateTime and beforeDateTime set to the window\n" +
+            "           above, then page it with offset/nextOffset until the results run out. That single call\n" +
+            "           already covers every 1:1, group and meeting chat you are in.\n" +
+            "           Do NOT call teams_list_chats to enumerate chats, and do NOT search chat by chat. This is\n" +
+            "           the mistake that makes Teams syncs fail: a date-filtered chat search has no server-side\n" +
+            "           endpoint behind it, so the connector answers it by walking ~50 chats itself. One call is\n" +
+            "           already ~50 Graph requests, and it costs that whether the window is an hour or a week —\n" +
+            "           so a second pass, or a per-chat loop, is what runs you into the rate limit. Chat ids for\n" +
+            "           recipientRef come out of the search results; you do not need a separate listing.\n" +
+            "           If the response is prefixed with a note that results are PARTIAL, or that it fell back\n" +
+            "           to a per-chat scan, the window was not fully read — treat that exactly like a 429 below."
           : null,
         "  You have read access only. If an item needs a reply, that is a task for the user to do — never",
         "  send, forward or post anything yourself.",
-        "  Microsoft Graph throttles hard (HTTP 429). Page through results rather than issuing many small",
-        "  searches. When you are throttled you CANNOT WAIT IT OUT — you have no timer, no sleep and no shell,",
-        "  so \"I will retry shortly\" just ends the run with the request still open, which the user sees as a",
-        "  failure with nothing banked. Instead call sync_complete immediately with sourceStatus, marking the",
-        "  throttled source failed and any source you finished ok. That banks the half you read and re-reads",
-        "  only the half you did not. Reporting a whole window ok that you only half-read is the one genuinely",
-        "  damaging outcome.",
+        "  Microsoft Graph throttles hard (HTTP 429), Teams far sooner than mail. When you are throttled you",
+        "  CANNOT WAIT IT OUT — you have no timer, no sleep and no shell, so \"I will retry shortly\" just ends",
+        "  the run with the request still open, which the user sees as a failure with nothing banked. Instead",
+        "  call sync_complete immediately with sourceStatus, marking the throttled source `throttled` and any",
+        "  source you finished `ok`. That banks the half you read, re-reads only the half you did not, and rests",
+        "  the throttled source so the user's next press does not spend a fresh budget on the same wall.",
+        "  Say `throttled` rather than `failed` whenever a rate limit or a partial-results note was the reason —",
+        "  `failed` alone reads as a broken connector and gets retried straight into the limit.",
+        "  Reporting a whole window ok that you only half-read is the one genuinely damaging outcome.",
         "",
         "WHAT BECOMES A TASK — a thing the user still owes someone:",
         "  yes: a direct ask or assignment, a question awaiting their answer, a commitment they made,",
@@ -948,10 +987,10 @@ export function registerTools(server: McpServer): void {
             'Tasks created, per source — e.g. { "outlook": 2, "teams": 0 }. Name every source the run scanned; a total spread across both would credit Teams for Outlook mail.',
           ),
         sourceStatus: z
-          .record(z.enum(SYNC_SOURCES), z.enum(["ok", "failed"]))
+          .record(z.enum(SYNC_SOURCES), z.enum(SYNC_SOURCE_OUTCOMES))
           .optional()
           .describe(
-            'Per-source outcome, for when one inbox was read fully and another was not — e.g. { "outlook": "ok", "teams": "failed" } after Graph throttled the Teams scan. Only sources marked ok advance their watermark, so the half you read is banked and only the half you did not is re-read. Prefer this over a blanket failed whenever you got through even one source: a blanket failed throws away work you actually did.',
+            'Per-source outcome, for when one inbox was read fully and another was not — e.g. { "outlook": "ok", "teams": "throttled" } after Graph throttled the Teams scan. Only sources marked ok advance their watermark, so the half you read is banked and only the half you did not is re-read. Prefer this over a blanket failed whenever you got through even one source: a blanket failed throws away work you actually did. Use "throttled" rather than "failed" whenever a 429 or a partial-results note was the reason — it holds the watermark back identically and additionally rests that source for a while, which is what stops the next press running into the same limit. "failed" is for a real error: no access, a broken tool, a window you could not finish for some other reason.',
           ),
         detail: z
           .string()
@@ -972,7 +1011,7 @@ export function registerTools(server: McpServer): void {
           imported?: Partial<Record<(typeof SYNC_SOURCES)[number], number>>;
           detail: string;
           status?: "ok" | "failed";
-          sourceStatus?: Partial<Record<(typeof SYNC_SOURCES)[number], "ok" | "failed">>;
+          sourceStatus?: Partial<Record<(typeof SYNC_SOURCES)[number], SyncSourceOutcome>>;
         },
         ctx,
       ) => {

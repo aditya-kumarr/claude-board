@@ -37,6 +37,14 @@ export const SYNC_SOURCES = ["outlook", "teams"] as const;
 export type SyncSource = (typeof SYNC_SOURCES)[number];
 
 /**
+ * How one source's scan turned out. `throttled` is `failed` with the reason
+ * attached — it holds the watermark back identically and additionally rests the
+ * source, because a rate limit says the next attempt would buy nothing.
+ */
+export const SYNC_SOURCE_OUTCOMES = ["ok", "failed", "throttled"] as const;
+export type SyncSourceOutcome = (typeof SYNC_SOURCE_OUTCOMES)[number];
+
+/**
  * A sync is queued rather than performed inline: the process serving the button
  * cannot reach Microsoft Graph, so it records the request and an agent run picks
  * it up. `ok`/`failed` are terminal.
@@ -293,6 +301,12 @@ export interface BoardSyncState {
   lastDetail: string | null;
   /** Cards created from this source, cumulative. */
   imported: number;
+  /**
+   * When this source may be scanned again, after a run reported being throttled.
+   * Null means now. Persisted rather than held in a watcher's memory because the
+   * limit belongs to the mailbox, not to the process that happened to hit it.
+   */
+  cooldownUntil: string | null;
   updatedAt: string;
 }
 
@@ -300,6 +314,24 @@ export interface BoardSyncState {
 export interface SyncScopeEntry {
   source: SyncSource;
   since: string;
+  /**
+   * Set when `since` was moved forward off the stored watermark by the source's
+   * lookback cap, and holds the watermark that was skipped past. Only Teams
+   * reaches this in practice: its scan returns the most recent messages per chat
+   * and nothing older, so a fortnight-wide request is a window the connector
+   * cannot fill — and left uncapped a repeatedly-throttled source's window grows
+   * without bound. Recorded rather than done quietly, because it is a real gap.
+   */
+  cappedFrom?: string;
+}
+
+/** A source left out of a run, and when it may be scanned again. */
+export interface SyncSkip {
+  source: SyncSource;
+  reason: "cooldown" | "interval";
+  /** When a press would actually scan it. */
+  nextEligibleAt: string;
+  detail: string;
 }
 
 export interface SyncRun {

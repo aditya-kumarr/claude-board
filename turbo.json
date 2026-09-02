@@ -14,7 +14,7 @@
     "WATCH_CLAUDE_CONFIG_DIR",
     "TUNNEL_NAME",
     "MENTION_WATCH_*",
-    "SYNC_WATCH_*",
+    "SYNC_*",
     "RESPONSE_WATCH_*",
     "INTAKE_WATCH_*",
     "ANTHROPIC_*",

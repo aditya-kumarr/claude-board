@@ -93,6 +93,33 @@ go through `write()` or the UI will not notice it.
   `cutoff` is stamped when the run is **requested**, not when it finishes, so a mail arriving
   mid-run stays above the watermark rather than being stepped over. `imported` is attributed per
   source — a bare total across two sources is rejected rather than credited to both.
+- **Outlook and Teams are not read on the same cadence, because a Teams read is not the same
+  price.** Outlook has a real server-side search: one filtered query, paged. A *date-filtered*
+  chat search has none, so the connector answers it by walking ~50 chats itself — one
+  `chat_message_search` is ~50 Microsoft Graph requests, and it costs that whether the window is an
+  hour or a fortnight. That single fact drives everything here. `SOURCE_POLICY` in `services/sync.ts`
+  gives each source a `minIntervalMs` (Teams 2h, Outlook 0) and a `maxLookbackDays` (Teams 3,
+  Outlook 14); `requestSync` drops a resting source from the scope **before** resolving windows and
+  returns it in `skipped`, which the toast and `sync_request` both print — a Sync that quietly
+  skipped Teams is indistinguishable from one that read it and found nothing. `force` is the
+  deliberate override. Narrowing the window is *not* a mitigation, which is the counter-intuitive
+  part: the scan visits every chat regardless, so only calling it less often helps.
+- **`throttled` is a third source outcome, and the reason it exists is that a 429 is not
+  retryable.** `sourceStatus` takes `ok | failed | throttled`; `throttled` holds the watermark back
+  exactly as `failed` does and *additionally* stamps `board_sync_state.cooldown_until`, so the next
+  press leaves that source alone instead of spending a fresh budget on the same wall. It is
+  persisted rather than held in the watcher's memory because the limit belongs to the mailbox, not
+  to the process that hit it — and because the watcher restarts. `completeSyncRun` also *infers* it
+  from a detail that describes a rate limit while reporting a plain `failed`, but only when
+  attribution is unambiguous (a single-source run, or a detail naming that source), since guessing
+  would rest Outlook for a limit Teams hit.
+- **The Teams lookback cap is the one place completeness is deliberately given up.** A source that
+  keeps failing never advances its watermark, so its window widens daily — and for Teams a wider
+  window is not merely slower, it is unfulfillable: the scan returns each chat's most recent
+  messages and nothing older. `resolveScopeEntry` clamps a stale watermark to `maxLookbackDays` and
+  records what it skipped in `SyncScopeEntry.cappedFrom`, which `sync_claim` prints as a note
+  telling the run to name the gap in its `detail`. Clamping quietly would be the bug; the gap is
+  real, so it is reported.
 - **A draft reply is a draft, and nothing here ever sends one.** A synced card exists because
   somebody is waiting on the user, so `task_responses` holds the message they owe back — one row
   per correspondent per `stage`: `acknowledge` is the reply to send now, `completion` the one to
@@ -293,6 +320,17 @@ rather than handing it a path to go and find. `--strict-mcp-config` still applie
 own `.mcp.json` is not reachable. A project whose directory has been moved is **not** retried: the
 run is dismissed immediately with the reason posted on the card, because a missing cwd will not fix
 itself in five seconds.
+
+The sync watcher's allowlist has one omission that is about cost rather than safety:
+**`teams_list_chats` is not in it.** A date-filtered `chat_message_search` already spans every chat,
+so enumerating chats and searching them one by one reads the same messages several times over and is
+the reliable way to earn a 429. The prompt says so too, but a prompt is advice and an allowlist is
+not — and per-chat thoroughness is exactly the shape of drift this needs to be safe from. Chat ids
+for `recipientRef` come out of the search results. The watcher also mirrors core's per-source
+cooldown into an in-process map, because Graph's limits are per **mailbox**: a 429 on one board's
+Teams has spent every other board's Teams budget too, which core — keyed by (board, source) — cannot
+see. It holds a queued run only when *every* source in its scope is resting, so a mixed run still
+gets dispatched for the Outlook half.
 
 `scripts/watch-responses.ts` is the strictest of the three, because rewriting a message needs the
 board and nothing else: board server only, `--strict-mcp-config`, and `mcp__board` as its entire
