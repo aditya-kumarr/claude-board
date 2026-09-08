@@ -37,11 +37,18 @@ export const SYNC_SOURCES = ["outlook", "teams"] as const;
 export type SyncSource = (typeof SYNC_SOURCES)[number];
 
 /**
- * How one source's scan turned out. `throttled` is `failed` with the reason
- * attached — it holds the watermark back identically and additionally rests the
- * source, because a rate limit says the next attempt would buy nothing.
+ * How one source's scan turned out.
+ *
+ * `throttled` is `failed` with the reason attached — it holds the watermark back
+ * identically and additionally rests the source, because a rate limit says the
+ * next attempt would buy nothing.
+ *
+ * `partial` is the opposite kind of not-finished: the run did exactly what it was
+ * asked, read its batch cleanly and banked which items it covered, and simply has
+ * more to go. The watermark is held back like a failure, but nothing went wrong,
+ * so it earns no cooldown and must not be shown to the user as an error.
  */
-export const SYNC_SOURCE_OUTCOMES = ["ok", "failed", "throttled"] as const;
+export const SYNC_SOURCE_OUTCOMES = ["ok", "partial", "failed", "throttled"] as const;
 export type SyncSourceOutcome = (typeof SYNC_SOURCE_OUTCOMES)[number];
 
 /**
@@ -287,6 +294,40 @@ export interface MentionWithContext extends Mention {
   project: ResolvedProject | null;
 }
 
+/**
+ * Resume state for a source that cannot be read in one run.
+ *
+ * A *pass* over the window is the unit: it starts at the watermark, ends at
+ * `passCutoff`, and may take several runs. `passCutoff` is frozen for the whole
+ * pass, because if each run used its own "now" the chats read in the first batch
+ * would silently miss everything that arrived while the later batches were read.
+ */
+export interface SyncSourceProgress {
+  /**
+   * Start of the window this pass is working through, frozen with the cutoff.
+   * Needed because the watermark deliberately does not move until the pass ends,
+   * so it cannot be recovered from stored state — without it a resuming batch has
+   * no window at all.
+   */
+  passSince: string;
+  /** Cutoff frozen when the pass began; becomes the watermark when it finishes. */
+  passCutoff: string;
+  /**
+   * Provider keys already fully read in this pass — Teams chat ids. Keys rather
+   * than a count or an opaque cursor, because the chat list reorders by recent
+   * activity between runs and a cursor can expire, whereas an id either was read
+   * or was not.
+   */
+  doneKeys: string[];
+  /** Mirror of `doneKeys.length`, so a renderer need not count. */
+  scanned: number;
+  /** Provider's total when it reports one, so progress reads as "10 of ~50". */
+  total: number | null;
+  /** Opaque provider cursor, kept best-effort as a fast path. */
+  cursor: string | null;
+  updatedAt: string;
+}
+
 /** Per-source watermark for one board. */
 export interface BoardSyncState {
   boardId: string;
@@ -307,6 +348,13 @@ export interface BoardSyncState {
    * limit belongs to the mailbox, not to the process that happened to hit it.
    */
   cooldownUntil: string | null;
+  /**
+   * Set while a multi-run pass is in flight over this source; null when it is up
+   * to date. Its presence is what lets a resuming batch skip the source's normal
+   * minimum interval — finishing a pass already started is cheap and urgent,
+   * where beginning a fresh one is neither.
+   */
+  progress: SyncSourceProgress | null;
   updatedAt: string;
 }
 
@@ -323,6 +371,19 @@ export interface SyncScopeEntry {
    * without bound. Recorded rather than done quietly, because it is a real gap.
    */
   cappedFrom?: string;
+  /**
+   * End of this source's window. Absent on runs recorded before per-source
+   * cutoffs existed, where the run's own cutoff applies. A source resuming a pass
+   * carries that pass's frozen cutoff so the window does not move under it.
+   */
+  cutoff?: string;
+  /**
+   * How many provider items (Teams chats) this run may read. Absent means no
+   * limit. Batching is what keeps a Teams scan under Graph's rate limit.
+   */
+  batchLimit?: number;
+  /** Progress carried forward, when this entry resumes a pass. */
+  resumeFrom?: SyncSourceProgress;
 }
 
 /** A source left out of a run, and when it may be scanned again. */
@@ -366,6 +427,13 @@ export interface BoardSyncSummary {
   activeRun: SyncRun | null;
   /** Most recent finished run, for "last synced" and the failure reason. */
   lastRun: SyncRun | null;
+  /**
+   * Sources a press would leave out right now, and when each becomes eligible.
+   * Computed rather than stored, and carried here so a settings panel can answer
+   * "why was Teams skipped and when can I retry" without having to press Sync to
+   * find out — which is how the same question was answered before.
+   */
+  skips: SyncSkip[];
 }
 
 /** A draft reply owed to one person, on one card. Never sent by this system. */

@@ -1,4 +1,18 @@
-import { AlertTriangle, Archive, AtSign, CalendarRange, FolderGit2, Loader2, MoreHorizontal, Plus, Sparkles, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  Archive,
+  AtSign,
+  CalendarRange,
+  FileDown,
+  FileSpreadsheet,
+  FolderGit2,
+  Loader2,
+  MoreHorizontal,
+  Plus,
+  SlidersHorizontal,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress, Separator } from "@/components/ui/misc";
@@ -31,6 +45,8 @@ export function BoardHeader({
   onDelete,
   onSync,
   onCancelSync,
+  onOpenSyncSettings,
+  onExport,
   onOpenIntake,
   onSetProject,
   syncing,
@@ -43,6 +59,8 @@ export function BoardHeader({
   onDelete: () => void;
   onSync: () => void;
   onCancelSync: () => void;
+  onOpenSyncSettings: () => void;
+  onExport: (format: "csv" | "xlsx") => void;
   /** Opens the intake chat — paste raw material, get cards. */
   onOpenIntake: () => void;
   /** Opens the picker for the directory this board's work happens in. */
@@ -94,6 +112,19 @@ export function BoardHeader({
               ) : null}
             </Button>
           </Hint>
+          {/* Sits against Sync because it configures that one press: which inboxes,
+              from when, and what the last attempt did. */}
+          <Hint label="Sync settings — sources, start date, rate limits, last result" side="bottom">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onOpenSyncSettings}
+              aria-label="Sync settings"
+              className="size-7 text-muted-foreground hover:text-foreground"
+            >
+              <SlidersHorizontal className="size-3.5" />
+            </Button>
+          </Hint>
           <SyncButton
             sync={detail.sync}
             disabled={board.archived}
@@ -121,6 +152,13 @@ export function BoardHeader({
               <DropdownMenuItem onSelect={onSetProject}>
                 <FolderGit2 /> {detail.project ? "Change project" : "Set a project"}
               </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => onExport("xlsx")}>
+                <FileSpreadsheet /> Export to Excel
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => onExport("csv")}>
+                <FileDown /> Export as CSV
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
               <DropdownMenuItem onSelect={onArchive}>
                 <Archive /> {board.archived ? "Unarchive board" : "Archive board"}
               </DropdownMenuItem>

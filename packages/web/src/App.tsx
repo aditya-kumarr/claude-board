@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState, Skeleton } from "@/components/ui/misc";
 import { BoardSidebar, type SidebarView } from "@/components/board-sidebar";
 import { BoardHeader } from "@/components/board-header";
+import { SyncSettings, type SyncOptions } from "@/components/sync-settings";
 import { BoardColumnView } from "@/components/board-column";
 import { TaskDialog } from "@/components/task-dialog";
 import { IntakePanel } from "@/components/intake-panel";
@@ -114,6 +115,7 @@ export default function App() {
   const fail = useCallback((message: string) => toast.error(message), []);
 
   const [syncing, setSyncing] = useState(false);
+  const [syncSettingsOpen, setSyncSettingsOpen] = useState(false);
 
   /**
    * Queues a sync. The API cannot reach Outlook or Teams itself, so success here
@@ -135,11 +137,45 @@ export default function App() {
     }
   }, [activeBoard, refresh, fail]);
 
-  const syncBoard = useCallback(async () => {
+  /**
+   * Downloads the board as a spreadsheet.
+   *
+   * A synthesised anchor rather than `window.open`: a popup blocker treats the
+   * latter as a popup, and this keeps the browser's own download UI, which is
+   * what makes it work on the tablet as well as the desktop.
+   */
+  const exportBoard = useCallback(
+    (format: "csv" | "xlsx") => {
+      if (!activeBoard) return;
+      const link = document.createElement("a");
+      link.href = api.exportUrl(activeBoard.board.id, format);
+      // The filename comes from the server's Content-Disposition; `download`
+      // only has to mark this as a download rather than a navigation.
+      link.download = "";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success(format === "xlsx" ? "Excel file downloading" : "CSV downloading", {
+        description:
+          format === "xlsx"
+            ? `${activeBoard.stats.total} card(s), with dropdowns on the state, assignee and priority columns.`
+            : `${activeBoard.stats.total} card(s), one row each.`,
+      });
+    },
+    [activeBoard],
+  );
+
+  const syncBoard = useCallback(async (options: SyncOptions = { sources: ["outlook", "teams"] }) => {
     if (!activeBoard) return;
     setSyncing(true);
     try {
-      const { run, alreadyQueued, skipped } = await api.requestSync(activeBoard.board.id);
+      const { run, alreadyQueued, skipped } = await api.requestSync(activeBoard.board.id, {
+        // Both sources is the default press, so send nothing and let core decide;
+        // a narrowed selection is the user overriding that on purpose.
+        sources: options.sources.length === 2 ? undefined : options.sources,
+        since: options.since,
+        force: options.force,
+      });
       const scope = run.scope.map((entry) => entry.source).join(" + ");
       // A source left out is worth a sentence. Teams is read on a slower cadence
       // than mail because one Teams scan costs ~50 Microsoft Graph calls, so a
@@ -155,6 +191,7 @@ export default function App() {
               }, so this press leaves it alone.`
             : "Claude reads your Outlook and Teams since the last sync and adds what is still outstanding.",
       });
+      setSyncSettingsOpen(false);
       await refresh();
     } catch (error) {
       fail(error instanceof ApiError ? error.message : "Could not queue the sync");
@@ -320,6 +357,8 @@ export default function App() {
                 onDelete={() => void removeBoard(activeBoard)}
                 onSync={() => void syncBoard()}
                 onCancelSync={() => void cancelSync()}
+                onOpenSyncSettings={() => setSyncSettingsOpen(true)}
+                onExport={exportBoard}
                 onOpenIntake={() => setIntakeOpen(true)}
                 onSetProject={() => setBoardProjectOpen(true)}
                 syncing={syncing}
@@ -433,6 +472,18 @@ export default function App() {
           toast.success("Board created");
         }}
       />
+
+      {activeBoard ? (
+        <SyncSettings
+          open={syncSettingsOpen}
+          sync={activeBoard.sync}
+          boardStartsAt={activeBoard.board.startsAt}
+          busy={syncing}
+          now={now}
+          onClose={() => setSyncSettingsOpen(false)}
+          onSync={(options) => void syncBoard(options)}
+        />
+      ) : null}
 
       <CreateTaskDialog
         board={activeBoard}

@@ -10,6 +10,7 @@ import type {
   Priority,
   SyncRun,
   SyncScopeEntry,
+  SyncSourceProgress,
   SyncSource,
   SyncStatus,
   Task,
@@ -120,6 +121,7 @@ export interface SyncStateRow {
   last_detail: string | null;
   imported: number;
   cooldown_until: string | null;
+  progress: string | null;
   updated_at: string;
 }
 export interface SyncRunRow {
@@ -323,6 +325,23 @@ export const toMention = (row: MentionRow): Mention => ({
   createdAt: row.created_at,
 });
 
+function parseProgress(raw: string | null): SyncSourceProgress | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as SyncSourceProgress;
+    // A malformed blob must not make the whole row unreadable; losing resume
+    // state costs a re-read, losing the watermark would cost correctness.
+    // A blob missing either end of its window cannot be resumed against a known
+    // window, so treat it as no progress: the pass restarts, which costs a re-read
+    // and never correctness.
+    if (typeof parsed?.passCutoff !== "string" || typeof parsed?.passSince !== "string") return null;
+    if (!Array.isArray(parsed.doneKeys)) return null;
+    return { ...parsed, scanned: parsed.doneKeys.length };
+  } catch {
+    return null;
+  }
+}
+
 export const toSyncState = (row: SyncStateRow): BoardSyncState => ({
   boardId: row.board_id,
   source: row.source as SyncSource,
@@ -332,6 +351,7 @@ export const toSyncState = (row: SyncStateRow): BoardSyncState => ({
   lastDetail: row.last_detail,
   imported: row.imported,
   cooldownUntil: row.cooldown_until,
+  progress: parseProgress(row.progress),
   updatedAt: row.updated_at,
 });
 

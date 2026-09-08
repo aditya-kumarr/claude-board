@@ -9,6 +9,7 @@ export { getDb, closeDb, getRevision, write } from "./db/index.ts";
 export { DEFAULT_COLUMNS, SEED_USERS } from "./db/schema.ts";
 export * from "./services/boards.ts";
 export * from "./services/columns.ts";
+export * from "./services/export.ts";
 export * from "./services/comments.ts";
 export * from "./services/intake.ts";
 export * from "./services/mentions.ts";

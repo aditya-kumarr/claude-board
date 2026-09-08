@@ -18,6 +18,7 @@ import {
   type SyncSkip,
   type SyncSourceOutcome,
   type SyncSource,
+  type SyncSourceProgress,
   type SyncStatus,
 } from "../types.ts";
 import { record } from "./activity.ts";
@@ -71,14 +72,28 @@ const envDays = (name: string, fallback: number): number => {
  * which stops a repeatedly-throttled source's window growing without bound and
  * keeps the ask inside what the connector can actually return.
  */
-const SOURCE_POLICY: Record<SyncSource, { minIntervalMs: number; maxLookbackDays: number }> = {
+const SOURCE_POLICY: Record<
+  SyncSource,
+  { minIntervalMs: number; maxLookbackDays: number; batchLimit: number }
+> = {
   outlook: {
     minIntervalMs: envMs("SYNC_OUTLOOK_MIN_INTERVAL_MS", 0),
     maxLookbackDays: envDays("SYNC_OUTLOOK_MAX_LOOKBACK_DAYS", 14),
+    // Outlook has a real server-side search: one filtered query, paged. There is
+    // nothing to batch, so no limit.
+    batchLimit: Number(process.env.SYNC_OUTLOOK_BATCH_LIMIT ?? 0),
   },
   teams: {
     minIntervalMs: envMs("SYNC_TEAMS_MIN_INTERVAL_MS", 2 * 60 * MINUTE_MS),
     maxLookbackDays: envDays("SYNC_TEAMS_MAX_LOOKBACK_DAYS", 3),
+    /**
+     * Chats per run. The reason a Teams scan gets throttled is that it visits
+     * every chat in one go; a bounded batch is the only mitigation, since
+     * narrowing the *window* does not reduce how many chats are walked. Cards
+     * from each batch land immediately, so the newest threads become tasks on the
+     * first run rather than after the whole sweep finishes.
+     */
+    batchLimit: Math.max(Number(process.env.SYNC_TEAMS_BATCH_LIMIT ?? 10), 1),
   },
 };
 
@@ -138,6 +153,7 @@ export function getSyncStates(boardId: string): BoardSyncState[] {
         lastDetail: null,
         imported: 0,
         cooldownUntil: null,
+        progress: null,
         updatedAt: "",
       },
   );
@@ -174,16 +190,35 @@ export function resolveScopeEntry(
 ): SyncScopeEntry {
   const board = syncBoard(boardId);
   const state = getSyncStates(boardId).find((entry) => entry.source === source);
+  const batchLimit = SOURCE_POLICY[source].batchLimit || undefined;
 
-  // An explicit window is the caller overriding the policy on purpose; honour it.
+  // An explicit window is the caller overriding the policy on purpose; honour it,
+  // and treat it as starting a fresh pass rather than resuming a stale one.
   if (options.explicitSince) {
-    return { source, since: parseDate(options.explicitSince, "since").toISOString() };
+    return { source, since: parseDate(options.explicitSince, "since").toISOString(), batchLimit };
+  }
+
+  // A pass already under way continues on its own frozen terms: same start, same
+  // cutoff, minus the items already read. Re-resolving the window here would move
+  // the end of a window the earlier batches were measured against.
+  if (state?.progress) {
+    return {
+      source,
+      // Both ends come from the pass, not from stored state: the watermark has
+      // deliberately not moved, so it cannot say where this pass began.
+      since: state.progress.passSince,
+      cutoff: state.progress.passCutoff,
+      batchLimit,
+      resumeFrom: state.progress,
+    };
   }
 
   if (state?.syncedThrough) {
     const cap = Date.now() - SOURCE_POLICY[source].maxLookbackDays * DAY_MS;
-    if (new Date(state.syncedThrough).getTime() >= cap) return { source, since: state.syncedThrough };
-    return { source, since: new Date(cap).toISOString(), cappedFrom: state.syncedThrough };
+    if (new Date(state.syncedThrough).getTime() >= cap) {
+      return { source, since: state.syncedThrough, batchLimit };
+    }
+    return { source, since: new Date(cap).toISOString(), cappedFrom: state.syncedThrough, batchLimit };
   }
 
   const lookbackDays = Math.min(
@@ -192,8 +227,12 @@ export function resolveScopeEntry(
   );
   const floor = Date.now() - lookbackDays * DAY_MS;
   const boardStart = new Date(board.startsAt).getTime();
-  return { source, since: new Date(Math.max(boardStart, floor)).toISOString() };
+  return { source, since: new Date(Math.max(boardStart, floor)).toISOString(), batchLimit };
 }
+
+/** This source's window end for a given run: its own if it froze one, else the run's. */
+export const scopeCutoff = (run: Pick<SyncRun, "cutoff">, entry: SyncScopeEntry): string =>
+  entry.cutoff ?? run.cutoff;
 
 /** The start of the next scan of `source`. See `resolveScopeEntry` for the rest. */
 export function resolveSince(boardId: string, source: SyncSource, options: ResolveSinceOptions = {}): string {
@@ -219,6 +258,12 @@ function eligibility(state: BoardSyncState): SyncSkip | null {
       detail: `${state.source} was throttled by Microsoft Graph and is resting until ${state.cooldownUntil}`,
     };
   }
+
+  // Finishing a pass already started is a different act from beginning one. The
+  // interval exists because a *full* Teams scan is ~50 Graph calls; the next
+  // batch of a pass in flight is a fraction of that, and making it wait two hours
+  // would turn one sweep into a day. A real throttle above still applies.
+  if (state.progress) return null;
 
   const { minIntervalMs } = SOURCE_POLICY[state.source];
   if (minIntervalMs > 0 && state.lastRunAt) {
@@ -323,10 +368,14 @@ export function getSyncSummary(boardId: string): BoardSyncSummary {
   const [lastRun] = listSyncRuns({ boardId, status: ["ok", "failed", "cancelled"], limit: 30 }).sort((a, b) =>
     (b.finishedAt ?? b.createdAt).localeCompare(a.finishedAt ?? a.createdAt),
   );
+  const sources = getSyncStates(boardId);
   return {
-    sources: getSyncStates(boardId),
+    sources,
     activeRun: activeRun ?? null,
     lastRun: lastRun ?? null,
+    // Same `eligibility` the request path uses, so the panel and the button can
+    // never disagree about what a press would actually do.
+    skips: sources.map(eligibility).filter((skip): skip is SyncSkip => skip !== null),
   };
 }
 
@@ -452,6 +501,45 @@ export function claimSyncRun(runId: string, actor: ActorContext): SyncRunWithCon
   return getSyncRunDetail(runId);
 }
 
+/**
+ * The `progress` column's next value for one source.
+ *
+ * `ok` clears it: the pass is done and the watermark has moved, so resume state
+ * would only mislead the next run. A source still working through a pass keeps
+ * it, merging this run's keys into what earlier batches recorded. A hard failure
+ * keeps whatever was there rather than discarding a pass's accumulated work over
+ * one bad run.
+ */
+function nextProgress(
+  entry: SyncScopeEntry,
+  cutoff: string,
+  outcome: SyncSourceOutcome,
+  reported: { doneKeys?: string[]; total?: number | null; cursor?: string | null } | undefined,
+): string | null {
+  if (outcome === "ok") return null;
+
+  const carried = entry.resumeFrom;
+  const merged = [...new Set([...(carried?.doneKeys ?? []), ...(reported?.doneKeys ?? [])])];
+  if (merged.length === 0 && reported === undefined) {
+    // Nothing new and nothing carried: leave the column as it was.
+    return carried ? JSON.stringify(carried) : null;
+  }
+
+  const progress: SyncSourceProgress = {
+    // The pass keeps the window it started with, even across a failure.
+    passSince: carried?.passSince ?? entry.since,
+    passCutoff: carried?.passCutoff ?? cutoff,
+    // Bounded so a pathological pass cannot grow the row without limit; the
+    // oldest keys are the likeliest to have been re-read harmlessly anyway.
+    doneKeys: merged.slice(-500),
+    scanned: Math.min(merged.length, 500),
+    total: reported?.total ?? carried?.total ?? null,
+    cursor: reported?.cursor ?? carried?.cursor ?? null,
+    updatedAt: new Date().toISOString(),
+  };
+  return JSON.stringify(progress);
+}
+
 export interface CompleteSyncInput {
   /**
    * Outcome for the run as a whole. Ignored for a source that names its own in
@@ -476,6 +564,14 @@ export interface CompleteSyncInput {
    * across several would credit Teams for mail that came out of Outlook.
    */
   imported?: number | Partial<Record<SyncSource, number>>;
+  /**
+   * What each source got through, for a source reporting `partial`. `doneKeys`
+   * are the provider ids fully read *this run*; they are merged with what earlier
+   * batches recorded, so a run only has to report its own work.
+   */
+  sourceProgress?: Partial<
+    Record<SyncSource, { doneKeys?: string[]; total?: number | null; cursor?: string | null }>
+  >;
   /** What was found and what was skipped. Shown as "last synced" detail. */
   detail: string;
 }
@@ -551,9 +647,14 @@ export function completeSyncRun(runId: string, input: CompleteSyncInput, actor: 
     // scanned one thing, or a detail that names this one. Guessing on a two-source
     // run would rest Outlook for a limit Teams hit.
     const attributable = run.scope.length === 1 || detail.toLowerCase().includes(entry.source);
+    // A batch that stopped *because* of a limit still spent the budget, so a
+    // `partial` describing a 429 earns the rest too — while keeping its progress,
+    // since the items it did read were read.
     outcomeBySource.set(
       entry.source,
-      inferred === "failed" && attributable && looksThrottled(detail) ? "throttled" : inferred,
+      (inferred === "failed" || inferred === "partial") && attributable && looksThrottled(detail)
+        ? "throttled"
+        : inferred,
     );
   }
   for (const key of Object.keys(input.sourceStatus ?? {})) {
@@ -562,13 +663,18 @@ export function completeSyncRun(runId: string, input: CompleteSyncInput, actor: 
     }
   }
   // `throttled` is a failure with a reason attached, so it lands the same way
-  // everywhere the watermark is concerned.
+  // everywhere the watermark is concerned. `partial` also holds the watermark,
+  // but it is stored as `failed` only because the column predates it — callers
+  // tell a mid-pass source from a broken one by `progress` being set, not by this.
   const statusBySource = new Map<SyncSource, "ok" | "failed">(
     [...outcomeBySource].map(([source, outcome]) => [source, outcome === "ok" ? "ok" : "failed"]),
   );
-  // The run reads as successful only if every source it took on succeeded — a
-  // partial read must not look complete in the history.
-  const overall: "ok" | "failed" = [...statusBySource.values()].every((value) => value === "ok") ? "ok" : "failed";
+  // A run is a failure only if something actually went wrong. A source that read
+  // its batch cleanly and has more to go did exactly what it was asked, so the
+  // run reads as successful and the remaining work shows as progress, not as an
+  // error the user has to interpret.
+  const broke = [...outcomeBySource.values()].some((value) => value === "failed" || value === "throttled");
+  const overall: "ok" | "failed" = broke ? "failed" : "ok";
 
   const finishedAt = new Date().toISOString();
   const cooldownUntil = new Date(Date.now() + THROTTLE_COOLDOWN_MS).toISOString();
@@ -583,9 +689,10 @@ export function completeSyncRun(runId: string, input: CompleteSyncInput, actor: 
 
     for (const entry of run.scope) {
       const outcome = outcomeBySource.get(entry.source)!;
+      const cutoff = scopeCutoff(run, entry);
       db.run(
-        `INSERT INTO board_sync_state (board_id, source, synced_through, last_run_at, last_status, last_detail, imported, cooldown_until, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO board_sync_state (board_id, source, synced_through, last_run_at, last_status, last_detail, imported, cooldown_until, progress, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (board_id, source) DO UPDATE SET
            -- Only a successful run may move the watermark.
            synced_through = CASE WHEN excluded.last_status = 'ok' THEN excluded.synced_through ELSE synced_through END,
@@ -597,16 +704,22 @@ export function completeSyncRun(runId: string, input: CompleteSyncInput, actor: 
            -- read cleanly is immediately available again rather than serving out
            -- a penalty for a limit that has plainly lifted.
            cooldown_until = excluded.cooldown_until,
+           -- Resume state survives a batch and is dropped the moment the pass
+           -- completes, so the next pass starts from the new watermark, clean.
+           progress       = excluded.progress,
            updated_at     = excluded.updated_at`,
         [
           run.boardId,
           entry.source,
-          outcome === "ok" ? run.cutoff : null,
+          outcome === "ok" ? cutoff : null,
           finishedAt,
           statusBySource.get(entry.source)!,
           detail,
-          outcome === "ok" ? (perSource.get(entry.source) ?? 0) : 0,
+          // Cards created stand whatever the outcome: a partial batch really did
+          // import them, and crediting them only on `ok` would undercount.
+          outcome === "throttled" || outcome === "failed" ? 0 : (perSource.get(entry.source) ?? 0),
           outcome === "throttled" ? cooldownUntil : null,
+          nextProgress(entry, cutoff, outcome, input.sourceProgress?.[entry.source]),
           finishedAt,
         ],
       );
@@ -619,6 +732,9 @@ export function completeSyncRun(runId: string, input: CompleteSyncInput, actor: 
       imported: Object.fromEntries(perSource),
       detail,
       advanced: [...statusBySource.entries()].filter(([, value]) => value === "ok").map(([key]) => key),
+      stillInPass: [...outcomeBySource.entries()]
+        .filter(([, value]) => value !== "ok")
+        .map(([key]) => key),
     });
   });
 

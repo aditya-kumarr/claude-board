@@ -35,6 +35,7 @@ import {
   getSyncRun,
   getSyncStates,
   listSyncRuns,
+  requestSync,
   looksThrottled,
   USER_CLAUDE,
   type ActorContext,
@@ -69,19 +70,19 @@ const MS365_SERVER = MS365_PREFIX.replace(/^mcp__/, "").replace(/_/g, " ").trim(
  * purpose: allowing the server wholesale would also hand an unattended run
  * `outlook_send_mail` and `outlook_forward_mail`.
  *
- * `teams_list_chats` is deliberately NOT here, and it is the one omission that is
- * about cost rather than safety. A date-filtered `chat_message_search` already
- * spans every chat the user is in — the connector answers it by walking ~50 chats
- * itself — so enumerating chats first and searching them one by one reads the same
- * mail several times over and is the reliable way to earn a 429. The prompt says
- * so, but a prompt is advice and an allowlist is not, and this is exactly the kind
- * of thoroughness a model drifts into. Chat ids for `recipientRef` come out of the
- * search results. Restore it through `SYNC_WATCH_ALLOWED_TOOLS` if a run ever
- * genuinely needs the listing.
+ * `teams_list_chats` is here because Teams is read in batches, chat by chat. A
+ * date-filtered `chat_message_search` looks cheaper — one call — but the connector
+ * answers it by walking ~50 chats internally and gets throttled part way, coming
+ * back with "searched 3 of 50 chats" and nothing bankable. Listing the chats and
+ * reading a bounded batch of them costs ~1 + batchLimit calls and, far more
+ * importantly, is deterministic: the run knows exactly which chats it covered, so
+ * the work survives into the next run instead of being lost to a 429. The search
+ * tool stays available as a fallback.
  */
 const MS365_READ_TOOLS = [
   "get_me",
   "outlook_email_search",
+  "teams_list_chats",
   "chat_message_search",
   "outlook_calendar_search",
   "read_resource",
@@ -123,12 +124,14 @@ function buildPrompt(run: SyncRunWithContext): string {
     "the rules for what counts as a task — follow those rules rather than improvising, and read only",
     "inside the window it gives you.",
     "",
-    "Then read the sources with the Microsoft 365 tools you have — outlook_email_search for mail, and",
-    "for Teams ONE chat_message_search with afterDateTime/beforeDateTime set to the window, paged with",
-    "offset. That one call already spans every chat: do not list chats and do not search chat by chat,",
-    "because a date-filtered chat search is answered by walking ~50 chats internally, so extra passes",
-    "are what trip the rate limit. Create a card per genuine outstanding item with task_create (always",
-    "passing sourceRef so a repeat sync cannot duplicate it).",
+    "Then read the sources with the Microsoft 365 tools you have. Outlook: outlook_email_search over the",
+    "window, paged. Teams: work in a BATCH, chat by chat — teams_list_chats once (it comes back",
+    "most-recent-first), take the first N chats sync_claim allows that are not already in its skip list,",
+    "and read each with read_resource on teams:///chats/<id>/messages, keeping messages inside the",
+    "window. Do NOT try to cover every chat in one run: a date-filtered chat_message_search walks ~50",
+    "chats internally and gets throttled part way, which is what has been making these runs fail.",
+    "Create a card per genuine outstanding item with task_create (always passing sourceRef so a repeat",
+    "sync cannot duplicate it).",
     "",
     "Then, for each card you create, draft the reply the user owes with response_draft — two per",
     "person who needs an answer: stage=acknowledge to send now, stage=completion to send once the",
@@ -141,14 +144,19 @@ function buildPrompt(run: SyncRunWithContext): string {
     "read, edit and send themselves. Nothing here can send mail or post to Teams, by design.",
     "",
     "Rules for finishing, which matter more than how much you import:",
-    "  - Report status=ok only if you actually read the whole window. Reporting ok advances the",
-    "    board's watermark, so a premature ok silently loses everything you did not read.",
+    "  - Report ok for a source only if you read its whole window. Reporting ok advances that source's",
+    "    watermark, so a premature ok silently loses everything you did not read.",
+    "  - Finishing your Teams batch with chats still to go is the NORMAL, successful outcome. Report",
+    "    teams as `partial` and pass sourceProgress.doneKeys with the chat ids you covered. The cards",
+    "    you made are kept, the ids are remembered, and the next run picks up where you stopped —",
+    "    without it the next run starts the batch over.",
     "  - If the Microsoft 365 tools error or report no access, complete the run with status=failed",
     "    and say exactly what they said. Do not try to authenticate — nobody is here to help.",
     "  - Microsoft Graph throttles (HTTP 429), Teams sooner than mail. You CANNOT wait it out: you have no",
     "    timer, no sleep and no shell. Saying you will retry shortly just ends this run with the request",
     "    still open, which the user sees as a failure having banked nothing. Call sync_complete straight",
-    '    away with sourceStatus instead — the throttled source `throttled`, anything you finished `ok`.',
+    '    away with sourceStatus instead — the throttled source `throttled` (with its doneKeys, so the',
+    "    chats you did read still count), anything you finished `ok`.",
     "    The ok half keeps its progress, only the rest is re-read, and `throttled` additionally rests that",
     "    source so the next press does not walk into the same limit. A partial-results note from the Teams",
     "    search counts as throttled too: the window was not fully read.",
@@ -193,10 +201,63 @@ function mirrorCooldowns(boardId: string): void {
   }
 }
 
+/**
+ * Continuations spent per board, so a pass that stops making progress cannot have
+ * this process queue runs for ever.
+ */
+const continuations = new Map<string, number>();
+const MAX_CONTINUATIONS = Math.max(Number(process.env.SYNC_WATCH_MAX_CONTINUATIONS ?? 12), 0);
+
+/**
+ * Queues the next batch of a pass that is part way through, so "the newest chats
+ * first, then the rest" happens on its own rather than waiting for another press.
+ *
+ * Guarded on progress actually advancing: a batch that read no new chats would
+ * otherwise loop, and the honest answer there is to stop and let a person look.
+ */
+function continuePass(boardId: string, before: Map<SyncSource, number>): void {
+  const midPass = getSyncStates(boardId).filter((state) => state.progress);
+  if (midPass.length === 0) return;
+
+  if (!midPass.some((state) => state.progress!.scanned > (before.get(state.source) ?? 0))) {
+    log.warn("pass made no progress; not continuing", { boardId, sources: midPass.map((s) => s.source) });
+    say("  … that batch read no new chats, so the pass is left rather than looped");
+    return;
+  }
+
+  const spent = continuations.get(boardId) ?? 0;
+  if (spent >= MAX_CONTINUATIONS) {
+    log.warn("continuation budget spent", { boardId, spent });
+    say(`  … ${spent} batches already queued for this board; press Sync to carry on`);
+    return;
+  }
+
+  const sources = midPass.map((state) => state.source);
+  try {
+    const { run, alreadyQueued } = requestSync(boardId, { sources }, watcher);
+    if (alreadyQueued) return;
+    continuations.set(boardId, spent + 1);
+    const progress = midPass[0]!.progress!;
+    log.info("queued the next batch", { boardId, runId: run.id, sources, scanned: progress.scanned });
+    say(
+      `  → queued the next batch (${progress.scanned}${progress.total ? ` of ~${progress.total}` : ""} chats read so far)`,
+    );
+  } catch (error) {
+    // A cooldown lands here, and resting first is the correct answer.
+    const message = error instanceof Error ? error.message : String(error);
+    log.info("not continuing the pass yet", { boardId, reason: message });
+    say(`  … next batch not queued yet: ${message.slice(0, 110)}`);
+  }
+}
+
 /** Runs one queued sync and makes sure it cannot be left spinning. */
 async function handle(run: SyncRunWithContext, mcpConfig: string): Promise<void> {
   log.info("dispatching sync", { runId: run.id, boardId: run.boardId, scope: run.scope, cutoff: run.cutoff });
   say(`→ ${run.id}  ${run.boardName}  [${run.scope.map((entry) => entry.source).join("+")}]`);
+
+  // Snapshot progress so the continuation can tell a batch that read new chats
+  // from one that spun.
+  const before = new Map(getSyncStates(run.boardId).map((state) => [state.source, state.progress?.scanned ?? 0]));
 
   const result = await runClaude({
     prompt: buildPrompt(run),
@@ -218,20 +279,27 @@ async function handle(run: SyncRunWithContext, mcpConfig: string): Promise<void>
     // "failed" with cards imported is a partial, not a washout: per-source
     // completion means some watermarks moved. Say so, or the operator reads a
     // red line and assumes nothing happened.
-    const partial = after.status === "failed" && after.imported > 0;
+    // A source part way through a pass is the ordinary batched outcome, not a
+    // washout — `progress` being set is what distinguishes it from a real break.
+    const midPass = getSyncStates(run.boardId).filter((state) => state.progress);
+    const partial = midPass.length > 0 || (after.status === "failed" && after.imported > 0);
     log.info("sync handled", {
       runId: run.id,
       status: after.status,
       partial,
+      midPass: midPass.map((state) => `${state.source}:${state.progress!.scanned}`),
       imported: after.imported,
       seconds: result.seconds,
     });
     say(
-      `  ${after.status === "ok" ? "✓" : partial ? "◐" : "✗"} ${
+      `  ${after.status === "ok" && !partial ? "✓" : partial ? "◐" : "✗"} ${
         partial ? `partial (${after.imported} imported)` : after.status
       } in ${result.seconds}s — ${after.detail ?? ""}`,
     );
     mirrorCooldowns(run.boardId);
+    // Only continue when nothing is resting: a cooldown means the next batch
+    // would walk straight back into the limit.
+    if (heldSources().length === 0) continuePass(run.boardId, before);
     return;
   }
 
@@ -285,7 +353,7 @@ say(`  microsoft 365 : your claude.ai connector, read tools only`);
 say(`  claude account: ${claudeAccount()} (config dir ${effectiveConfigDir()})`);
 say(`  poll / timeout: ${INTERVAL_MS}ms / ${Math.round(TIMEOUT_MS / 1000)}s per run`);
 say(`  throttle hold : per source, mirrored from the cooldown core records on a 429`);
-say(`  teams         : one date-filtered chat search per run, never a per-chat walk`);
+say(`  teams         : read in batches, newest chats first, resuming where the last run stopped`);
 say(`  mode          : ${DRY_RUN ? "DRY RUN — nothing is spawned" : ONCE ? "one pass" : "watching"}`);
 say("");
 say("  Runs here read your mail and Teams messages. They cannot send mail, post to Teams,");

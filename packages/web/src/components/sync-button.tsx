@@ -22,6 +22,9 @@ const STALE_AFTER_MS = 20_000;
 function outcome(sync: BoardSyncSummary): "ok" | "partial" | "failed" | null {
   const run = sync.lastRun;
   if (!run || run.status === "cancelled") return null;
+  // A source part way through a batched pass outranks the run's own status: the
+  // run succeeded at the batch it was given, and there is simply more to read.
+  if (sync.sources.some((state) => state.progress)) return "partial";
   if (run.status === "ok") return "ok";
   // Partial needs something actually left over to name. Without this guard a run
   // whose sources all read ok rendered as "Imported 0,  unfinished".
@@ -29,6 +32,19 @@ function outcome(sync: BoardSyncSummary): "ok" | "partial" | "failed" | null {
   if (incomplete.length === 0) return run.imported > 0 ? "ok" : "failed";
   const banked = run.imported > 0 || sync.sources.some((state) => state.lastStatus === "ok");
   return banked ? "partial" : "failed";
+}
+
+/** "Teams 10 of ~47 chats" — what is left of a pass, for the result line. */
+function passLabel(sync: BoardSyncSummary): string | null {
+  const mid = sync.sources.filter((state) => state.progress);
+  if (mid.length === 0) return null;
+  return mid
+    .map(
+      (state) =>
+        `${SYNC_SOURCE_LABELS[state.source]} ${state.progress!.scanned}` +
+        `${state.progress!.total ? ` of ~${state.progress!.total}` : ""} chats`,
+    )
+    .join(", ");
 }
 
 export interface SyncButtonProps {
@@ -81,7 +97,10 @@ export function SyncButton({ sync, disabled, pressing, now, onSync, onCancel }: 
     if (lastRun) {
       const when = relativeTime(lastRun.finishedAt ?? lastRun.createdAt);
       const incomplete = sources.filter((state) => state.lastStatus === "failed").map((state) => SYNC_SOURCE_LABELS[state.source]);
-      if (lastRun.status === "ok") {
+      const pass = passLabel(sync);
+      if (pass) {
+        lines.push(`Pass in progress: ${pass} read. Press Sync to continue it — nothing is re-read.`);
+      } else if (lastRun.status === "ok") {
         lines.push(`Last run ${when}: ${lastRun.imported > 0 ? `${lastRun.imported} task(s) imported` : "nothing new"}`);
       } else if (lastRun.status === "failed") {
         lines.push(
@@ -190,11 +209,14 @@ export function SyncResult({ sync, now }: { sync: BoardSyncSummary; now: number 
 
   const tone =
     result === "ok" ? "var(--muted-foreground)" : result === "partial" ? "var(--kind-review)" : "var(--destructive)";
+  const pass = passLabel(sync);
   const headline =
     result === "failed"
       ? "Sync failed"
       : result === "partial"
-        ? `Imported ${lastRun.imported}, ${incomplete.join(" and ")} unfinished`
+        ? pass
+          ? `Imported ${lastRun.imported} — read ${pass} so far`
+          : `Imported ${lastRun.imported}, ${incomplete.join(" and ")} unfinished`
         : lastRun.imported > 0
           ? `Imported ${lastRun.imported}`
           : "Nothing new";
@@ -211,7 +233,11 @@ export function SyncResult({ sync, now }: { sync: BoardSyncSummary; now: number 
       <span className="min-w-0">
         <span className="font-medium">{headline}</span>
         {result === "partial" ? (
-          <span className="text-muted-foreground"> — press Sync again to finish the rest; nothing was lost.</span>
+          <span className="text-muted-foreground">
+            {pass
+              ? " — the newest threads are in; press Sync to keep going through the rest."
+              : " — press Sync again to finish the rest; nothing was lost."}
+          </span>
         ) : null}
         {lastRun.detail ? <span className="text-muted-foreground"> · {lastRun.detail}</span> : null}
         <span className="text-muted-foreground"> · {relativeTime(lastRun.finishedAt ?? lastRun.createdAt)}</span>

@@ -148,6 +148,17 @@ export type SyncSource = "outlook" | "teams";
 export type SyncStatus = "pending" | "running" | "ok" | "failed" | "cancelled";
 
 /** Per-source watermark: everything up to `syncedThrough` has been considered. */
+/** Resume state for a source read in batches across several runs. */
+export interface SyncSourceProgress {
+  passSince: string;
+  passCutoff: string;
+  doneKeys: string[];
+  scanned: number;
+  total: number | null;
+  cursor: string | null;
+  updatedAt: string;
+}
+
 export interface BoardSyncState {
   boardId: string;
   source: SyncSource;
@@ -158,6 +169,8 @@ export interface BoardSyncState {
   imported: number;
   /** When a source throttled by Graph may be scanned again. Null means now. */
   cooldownUntil: string | null;
+  /** Set while a multi-run pass over this source is still going. */
+  progress: SyncSourceProgress | null;
   updatedAt: string;
 }
 
@@ -193,6 +206,8 @@ export interface SyncRun {
 }
 
 export interface BoardSyncSummary {
+  /** Sources a press would leave out right now, and when each becomes eligible. */
+  skips: SyncSkip[];
   sources: BoardSyncState[];
   activeRun: SyncRun | null;
   lastRun: SyncRun | null;

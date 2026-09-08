@@ -399,6 +399,20 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE board_sync_state ADD COLUMN cooldown_until TEXT;
     `,
   },
+  {
+    version: 8,
+    name: "sync_source_progress",
+    sql: /* sql */ `
+      -- Resume state for a source too large to read in one run. Teams forced it:
+      -- a date-filtered chat search sweeps ~50 chats and Graph throttles long
+      -- before it finishes, so a run reads a handful, banks which ones it did,
+      -- and the next run continues from there instead of starting over.
+      --
+      -- JSON: { passCutoff, doneKeys[], scanned, total, cursor, updatedAt }.
+      -- Cleared the moment the source completes, so the next pass starts clean.
+      ALTER TABLE board_sync_state ADD COLUMN progress TEXT;
+    `,
+  },
 ];
 
 /** Assignees exist before any board does, so both transports can reference them. */

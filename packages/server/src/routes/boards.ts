@@ -5,6 +5,7 @@ import {
   createTask,
   deleteBoard,
   deleteColumn,
+  buildBoardExport,
   cancelSyncRun,
   getBoardDetail,
   getSyncSummary,
@@ -14,10 +15,12 @@ import {
   listSyncRuns,
   notFound,
   requestSync,
+  toCsv,
   updateBoard,
   updateColumn,
 } from "@automation/core";
 import { route } from "../middleware/errors.ts";
+import { boardToXlsx } from "../lib/xlsx.ts";
 import { actorFrom, param } from "./helpers.ts";
 import { intakeRouter } from "./intake.ts";
 
@@ -110,6 +113,38 @@ boardsRouter.delete(
     const { activeRun } = getSyncSummary(boardId);
     if (!activeRun) throw notFound("outstanding sync for this board");
     res.json(cancelSyncRun(activeRun.id, String(req.body?.reason ?? "cancelled from the board"), actorFrom(req)));
+  }),
+);
+
+/**
+ * The board as a spreadsheet. `format=xlsx` gets headings, dropdowns on the
+ * fixed-set columns and real dates; `csv` gets the same table as plain text.
+ *
+ * Served as a download rather than JSON because the point is to open it: the
+ * filename carries the board and the date, so a folder of these stays legible.
+ */
+boardsRouter.get(
+  "/:boardId/export",
+  route(async (req, res) => {
+    // buildBoardExport 404s on an unknown board itself, so there is nothing to
+    // check first — and getBoardDetail here would compute stats, mentions and the
+    // sync summary that the export does not use.
+    const data = buildBoardExport(param(req, "boardId"));
+    const stamp = data.generatedAt.slice(0, 10);
+    const format = req.query.format === "xlsx" ? "xlsx" : "csv";
+    const filename = `${data.slug}-${stamp}.${format}`;
+
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    // The filename is derived from a user-supplied board name, so it is quoted
+    // above and the slug strips anything but [a-z0-9-] — a header cannot carry a
+    // stray quote or newline out of a board title.
+    if (format === "xlsx") {
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.send(await boardToXlsx(data));
+      return;
+    }
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.send(toCsv(data, { includeSummary: req.query.summary === "true" }));
   }),
 );
 

@@ -104,6 +104,30 @@ go through `write()` or the UI will not notice it.
   skipped Teams is indistinguishable from one that read it and found nothing. `force` is the
   deliberate override. Narrowing the window is *not* a mitigation, which is the counter-intuitive
   part: the scan visits every chat regardless, so only calling it less often helps.
+- **Teams is therefore read in batches of chats, not in one sweep — and a pass spans runs.** The
+  single `chat_message_search` above is cheap to *write* and unreliable to *run*: it gets throttled
+  part way, comes back "searched 3 of 50 chats", and banks nothing. So a run lists chats once, reads
+  a bounded batch of them (`SOURCE_POLICY.batchLimit`, Teams 10) newest-first via
+  `teams:///chats/<id>/messages`, creates those cards, and reports the source `partial` with the ids
+  it covered. The point is not that ~11 calls beats ~50; it is that the batch is **deterministic** —
+  the run knows exactly which chats it read, so the work survives into the next run instead of being
+  lost to a 429, and the newest threads become cards on the first run rather than after a full sweep.
+- **`board_sync_state.progress` is the pass, and both ends of its window are frozen in it.** A pass
+  starts at the watermark, ends at `passCutoff`, and takes as many runs as it takes; `passSince` is
+  stored alongside because the watermark deliberately does *not* move until the pass finishes, so it
+  cannot say where the pass began — without it a resuming batch resolves an empty window. `doneKeys`
+  holds provider ids rather than a count or a cursor: the chat list reorders by recent activity
+  between runs and a cursor can expire, but an id either was read or was not. `nextProgress` merges
+  each run's keys into it, and `ok` clears the whole row's progress so the next pass starts clean.
+- **A source with a pass in flight skips its own `minIntervalMs`.** `eligibility` returns null early
+  for it. Finishing a pass already started is a different act from beginning one — the next batch is
+  a fraction of a full scan, and making it serve Teams' 2h interval would turn one sweep into a day.
+  A real `cooldown` from a 429 still applies, because that is the limit talking rather than policy.
+- **`partial` is a fourth source outcome and is *not* a failure.** It holds the watermark exactly as
+  `failed` does, but nothing went wrong: the run read its batch cleanly and has more to go, so it
+  earns no cooldown, keeps the cards it made, and leaves the run's own `status` as `ok`. Only
+  `failed` and `throttled` make a run read as broken. The column still stores `ok`/`failed`, so
+  callers tell a mid-pass source from a broken one by `progress` being set — not by `lastStatus`.
 - **`throttled` is a third source outcome, and the reason it exists is that a 429 is not
   retryable.** `sourceStatus` takes `ok | failed | throttled`; `throttled` holds the watermark back
   exactly as `failed` does and *additionally* stamps `board_sync_state.cooldown_until`, so the next
@@ -171,6 +195,16 @@ go through `write()` or the UI will not notice it.
 - Every mutation appends to `activity` inside the caller's transaction, recording `actor_id`
   and `source` (`web` | `mcp` | `system`).
 
+`services/export.ts` owns *which* fields make a board legible outside the app, because that is a
+domain decision both transports share — and it declares each field's closed value set next to the
+data (`ExportField.options`), which is what lets the spreadsheet writer put a dropdown on State
+holding exactly this board's columns rather than a list inferred from the values that happen to
+appear. It builds CSV itself (needs nothing) and leaves XLSX to `server/src/lib/xlsx.ts`, the only
+place with a dependency able to emit cell styles and data validation. `toCsv` prefixes a leading
+`=`, `+`, `-` or `@` with an apostrophe: cards here are built out of mail and chat, so a subject
+line of `=HYPERLINK(...)` is a live formula the moment the file is opened. **Nothing imports these
+files back**, so the dropdowns are for reading and for the reader's own working, not a round trip.
+
 `services/sync.ts` reads the two board fields it needs with its own query rather than importing
 `getBoard`, because `getBoardDetail` embeds the sync summary and the import would close a cycle.
 `services/intake.ts` and `services/responses.ts` read the task/board fields they need with their own
@@ -227,6 +261,10 @@ leads with a banner of queued reply changes, `board_get` marks which cards have 
 `task_get` lists a card's drafts above its comments — on a card that came out of somebody's mail the
 reply owed back is the point of the card, not a footnote. `response_claim` returns the instruction,
 the current message in full and the card, so one call is enough to act.
+
+`board_export` renders the board as CSV. It is deliberately *not* the way to read a board — one
+card's worth of prose per row makes it far bulkier than `board_get` — so its description says as
+much, and points at the UI for the `.xlsx` version it cannot produce.
 
 `project_list` / `project_add` / `project_update` / `project_delete` register the directories work
 can be delegated into; a card or board is pointed at one through `task_update` / `board_update`'s
@@ -332,6 +370,12 @@ Teams has spent every other board's Teams budget too, which core — keyed by (b
 see. It holds a queued run only when *every* source in its scope is resting, so a mixed run still
 gets dispatched for the Outlook half.
 
+The sync watcher also *continues* a pass on its own: after a run that leaves `progress` behind and
+with nothing resting, `continuePass` queues the next batch, so "newest threads first, then the rest"
+happens without the user pressing Sync again. It is guarded on `scanned` actually having grown —
+a batch that read no new chats stops the loop rather than queueing for ever — and capped by
+`SYNC_WATCH_MAX_CONTINUATIONS`.
+
 `scripts/watch-responses.ts` is the strictest of the three, because rewriting a message needs the
 board and nothing else: board server only, `--strict-mcp-config`, and `mcp__board` as its entire
 allowlist — no connector, no file tools. A run that ends without calling `response_complete` is
@@ -380,6 +424,18 @@ shadcn-style primitives in `components/ui/`. Colours come from CSS variables onl
 
 Drag-and-drop is native HTML5 (no dnd library). The drop index is computed from the pointer's
 position against each card's midpoint in `board-column.tsx`.
+
+**The Sync settings panel configures one press, not a stored preference.**
+`sync-settings.tsx` picks the sources, optionally overrides the start date, and can force past a
+rest — all arguments to the next `requestSync` and nothing more. The durable equivalents already
+exist and are better: the watermark decides where a normal sync starts and `SOURCE_POLICY` decides
+how often each source is read, so a saved "always read Teams from the 1st" would quietly fight
+both. `BoardSyncSummary.skips` is what makes the panel honest — it runs the *same* `eligibility`
+the request path uses, so the panel and the button can never disagree about what a press will do,
+and "when can I retry" is answerable without pressing Sync to find out. The result is bulleted
+because the facts live in two places: which watermarks moved and what is resting come from
+per-source state, while the prose comes from the run's `detail`, and neither alone answers "what
+happened".
 
 **Expired and archived are different things, and the sidebar says so.** A board whose `endsAt`
 has passed drops into the sidebar's own *Expired* group — nothing is written to say so, it is

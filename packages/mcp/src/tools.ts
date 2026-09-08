@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
   addColumn,
+  buildBoardExport,
   addComment,
   AppError,
   COLUMN_KINDS,
@@ -48,6 +49,8 @@ import {
   requestResponseDrafts,
   requireProject,
   requestSync,
+  scopeCutoff,
+  toCsv,
   RESPONSE_CHANNELS,
   RESPONSE_STAGES,
   RESPONSE_STATUSES,
@@ -363,6 +366,31 @@ export function registerTools(server: McpServer): void {
     handler("board_activity", (args: { boardId: string; limit?: number }) =>
       renderActivity(listActivity({ boardId: args.boardId, limit: args.limit ?? 30 })),
     ),
+  );
+
+  server.registerTool(
+    "board_export",
+    {
+      title: "Export a board as CSV",
+      description:
+        "The whole board as CSV — one row per card with its state, assignee, priority, dates, counts and description, ordered the way the board reads. Use it when the user wants the board somewhere else (a spreadsheet, a mail, a report) rather than asked about a particular card; for reading a board yourself, board_get is far more compact. The web UI also offers an .xlsx version with headings and dropdowns, which this cannot produce.",
+      inputSchema: {
+        boardId: z.string(),
+        includeSummary: z
+          .boolean()
+          .optional()
+          .describe("Prefix the board's name, window and totals as `# key,value` comment lines. Default false."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    handler("board_export", (args: { boardId: string; includeSummary?: boolean }) => {
+      const data = buildBoardExport(args.boardId);
+      const csv = toCsv(data, { includeSummary: args.includeSummary });
+      return (
+        `${data.boardName} — ${data.rows.length} card(s), ${data.fields.length} columns.\n` +
+        `Suggested filename: ${data.slug}-${data.generatedAt.slice(0, 10)}.csv\n\n${csv}`
+      );
+    }),
   );
 
   /* ----------------------------------------------------------------- columns */
@@ -871,15 +899,33 @@ export function registerTools(server: McpServer): void {
       const run = claimSyncRun(args.runId, ctx);
       const board = getBoardDetail(run.boardId);
       const windows = run.scope
-        .map(
-          (entry) =>
-            `  - ${entry.source}: everything from ${entry.since} up to ${run.cutoff}` +
-            (entry.cappedFrom
-              ? `\n      NOTE: this window was capped. ${entry.source} is unread since ${entry.cappedFrom}, but the\n` +
-                `      connector cannot return messages that old, so ${entry.since} is the honest start. Say in\n` +
-                `      sync_complete that the span before it was skipped, so the user can check it themselves.`
-              : ""),
-        )
+        .map((entry) => {
+          const lines = [`  - ${entry.source}: everything from ${entry.since} up to ${scopeCutoff(run, entry)}`];
+          if (entry.cappedFrom) {
+            lines.push(
+              `      NOTE: this window was capped. ${entry.source} is unread since ${entry.cappedFrom}, but the`,
+              `      connector cannot return messages that old, so ${entry.since} is the honest start. Say in`,
+              `      sync_complete that the span before it was skipped, so the user can check it themselves.`,
+            );
+          }
+          if (entry.batchLimit) {
+            lines.push(
+              `      BATCH: read at most ${entry.batchLimit} chat(s)/thread(s) this run, newest first. Do not try to`,
+              `      finish the whole source — a bounded batch is the entire reason this run will succeed.`,
+            );
+          }
+          if (entry.resumeFrom) {
+            const { scanned, total, doneKeys } = entry.resumeFrom;
+            lines.push(
+              `      RESUMING a pass already in progress: ${scanned}${total ? ` of ~${total}` : ""} already read.`,
+              `      Its cutoff is frozen at ${scopeCutoff(run, entry)} — that is deliberate, so the earlier`,
+              `      batches are not measured against a window that has since moved. SKIP these ids, they are done:`,
+              `        ${doneKeys.slice(-40).join(", ")}`,
+              doneKeys.length > 40 ? `        (…and ${doneKeys.length - 40} more; the full list is the source of truth)` : "",
+            );
+          }
+          return lines.filter(Boolean).join("\n");
+        })
         .join("\n");
 
       return [
@@ -897,28 +943,36 @@ export function registerTools(server: McpServer): void {
             "           subject and sender are not enough to judge whether it is a task."
           : null,
         run.scope.some((entry) => entry.source === "teams")
-          ? "  teams:   ONE chat_message_search call, with afterDateTime and beforeDateTime set to the window\n" +
-            "           above, then page it with offset/nextOffset until the results run out. That single call\n" +
-            "           already covers every 1:1, group and meeting chat you are in.\n" +
-            "           Do NOT call teams_list_chats to enumerate chats, and do NOT search chat by chat. This is\n" +
-            "           the mistake that makes Teams syncs fail: a date-filtered chat search has no server-side\n" +
-            "           endpoint behind it, so the connector answers it by walking ~50 chats itself. One call is\n" +
-            "           already ~50 Graph requests, and it costs that whether the window is an hour or a week —\n" +
-            "           so a second pass, or a per-chat loop, is what runs you into the rate limit. Chat ids for\n" +
-            "           recipientRef come out of the search results; you do not need a separate listing.\n" +
-            "           If the response is prefixed with a note that results are PARTIAL, or that it fell back\n" +
-            "           to a per-chat scan, the window was not fully read — treat that exactly like a 429 below."
+          ? "  teams:   work chat by chat, in batches, NOT with one date-filtered chat_message_search.\n" +
+            "             1. teams_list_chats — one call, already ordered most-recent-message first.\n" +
+            "             2. Take the first BATCH chats that are not in the skip list above.\n" +
+            "             3. For each, read_resource \"teams:///chats/<urlencoded chat id>/messages\" (one call per\n" +
+            "                chat, newest first) and keep only messages inside the window.\n" +
+            "             4. Create the cards, then sync_complete reporting teams as `partial` with the chat ids\n" +
+            "                you covered in sourceProgress.doneKeys — unless that batch finished the last chat,\n" +
+            "                in which case report `ok`.\n" +
+            "           Why not the single search: a date-filtered chat_message_search has no server-side endpoint\n" +
+            "           behind it, so the connector answers it by walking ~50 chats itself, and it gets throttled\n" +
+            "           part way — it returns 'searched 3 of 50 chats' and you have banked nothing. 1 + BATCH\n" +
+            "           targeted calls is both cheaper and, more importantly, deterministic: you know exactly which\n" +
+            "           chats you covered, so the work survives into the next run. Newest chats first means the\n" +
+            "           live asks become cards on this run rather than after the whole sweep.\n" +
+            "           Chat ids for recipientRef are the ones you listed in step 1."
           : null,
         "  You have read access only. If an item needs a reply, that is a task for the user to do — never",
         "  send, forward or post anything yourself.",
         "  Microsoft Graph throttles hard (HTTP 429), Teams far sooner than mail. When you are throttled you",
         "  CANNOT WAIT IT OUT — you have no timer, no sleep and no shell, so \"I will retry shortly\" just ends",
-        "  the run with the request still open, which the user sees as a failure with nothing banked. Instead",
-        "  call sync_complete immediately with sourceStatus, marking the throttled source `throttled` and any",
-        "  source you finished `ok`. That banks the half you read, re-reads only the half you did not, and rests",
-        "  the throttled source so the user's next press does not spend a fresh budget on the same wall.",
-        "  Say `throttled` rather than `failed` whenever a rate limit or a partial-results note was the reason —",
-        "  `failed` alone reads as a broken connector and gets retried straight into the limit.",
+        "  the run with the request still open, which the user sees as a failure with nothing banked. Always",
+        "  finish through sync_complete, choosing per source:",
+        "    ok        — you read this source's whole window. Its watermark advances.",
+        "    partial   — you read your batch cleanly and there is more to go. This is the NORMAL outcome for a",
+        "                batched Teams run and is not an error: the cards you made are kept, the ids you covered",
+        "                are remembered, and the next run continues. Pass sourceProgress.doneKeys with it.",
+        "    throttled — a 429 or a partial-results note stopped you. Same as partial for progress, and it also",
+        "                rests the source so the next press does not spend a fresh budget on the same wall.",
+        "    failed    — something actually broke (no access, a connector error). Reserve it for that; on its own",
+        "                it reads as a broken connector and gets retried straight into whatever stopped you.",
         "  Reporting a whole window ok that you only half-read is the one genuinely damaging outcome.",
         "",
         "WHAT BECOMES A TASK — a thing the user still owes someone:",
@@ -992,6 +1046,28 @@ export function registerTools(server: McpServer): void {
           .describe(
             'Per-source outcome, for when one inbox was read fully and another was not — e.g. { "outlook": "ok", "teams": "throttled" } after Graph throttled the Teams scan. Only sources marked ok advance their watermark, so the half you read is banked and only the half you did not is re-read. Prefer this over a blanket failed whenever you got through even one source: a blanket failed throws away work you actually did. Use "throttled" rather than "failed" whenever a 429 or a partial-results note was the reason — it holds the watermark back identically and additionally rests that source for a while, which is what stops the next press running into the same limit. "failed" is for a real error: no access, a broken tool, a window you could not finish for some other reason.',
           ),
+        sourceProgress: z
+          .record(
+            z.enum(SYNC_SOURCES),
+            z.object({
+              doneKeys: z
+                .array(z.string())
+                .optional()
+                .describe("Provider ids you fully read THIS run — Teams chat ids. Merged with what earlier batches recorded."),
+              total: z
+                .number()
+                .int()
+                .min(0)
+                .nullable()
+                .optional()
+                .describe("Total items the provider reported, if it reported one, so progress can read as \"10 of ~50\"."),
+              cursor: z.string().nullable().optional().describe("Provider cursor, if you have one. Best-effort."),
+            }),
+          )
+          .optional()
+          .describe(
+            "What each source got through. REQUIRED alongside a `partial` or `throttled` source: without it the next run cannot tell which chats you already covered and starts the batch from the beginning.",
+          ),
         detail: z
           .string()
           .describe(
@@ -1012,18 +1088,38 @@ export function registerTools(server: McpServer): void {
           detail: string;
           status?: "ok" | "failed";
           sourceStatus?: Partial<Record<(typeof SYNC_SOURCES)[number], SyncSourceOutcome>>;
+          sourceProgress?: Partial<
+            Record<(typeof SYNC_SOURCES)[number], { doneKeys?: string[]; total?: number | null; cursor?: string | null }>
+          >;
         },
         ctx,
       ) => {
         const { runId, ...input } = args;
         const run = completeSyncRun(runId, input, ctx);
-        return (
-          `Sync ${run.id} marked ${run.status}. ${
-            run.status === "ok"
-              ? `Watermark advanced to ${run.cutoff}.`
-              : "Watermark left where it was; the next run re-reads this window."
-          }\n\n${renderSyncState(getSyncSummary(run.boardId))}`
+        const sync = getSyncSummary(run.boardId);
+        const scanned = new Set(run.scope.map((entry) => entry.source));
+        const advanced = sync.sources.filter((state) => scanned.has(state.source) && !state.progress && state.lastStatus === "ok");
+        const midPass = sync.sources.filter((state) => scanned.has(state.source) && state.progress);
+        const held = sync.sources.filter(
+          (state) => scanned.has(state.source) && state.lastStatus === "failed" && !state.progress,
         );
+
+        return [
+          `Sync ${run.id} recorded.`,
+          advanced.length ? `  advanced: ${advanced.map((s) => s.source).join(", ")} — watermark now ${run.cutoff}` : null,
+          midPass.length
+            ? `  still in a pass: ${midPass
+                .map((s) => `${s.source} (${s.progress!.scanned}${s.progress!.total ? ` of ~${s.progress!.total}` : ""} read)`)
+                .join(", ")} — watermark held; the next run resumes from there`
+            : null,
+          held.length
+            ? `  held back: ${held.map((s) => s.source).join(", ")} — watermark unmoved, this window is re-read next time`
+            : null,
+          "",
+          renderSyncState(sync),
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n");
       },
     ),
   );

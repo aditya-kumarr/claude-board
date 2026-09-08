@@ -180,10 +180,24 @@ function syncLine(sync: BoardSyncSummary): string | null {
         resting.map((state) => state.cooldownUntil!).sort().at(-1)!,
       )}, so a sync now skips it`
     : "";
-  if (synced.length === 0) return `inbox sync: never run for this board${rest}`;
+  // A pass part way through is the thing most worth saying: there is more to read
+  // and it takes another press, which "through <date>" alone would not tell anyone.
+  const midPass = sync.sources
+    .filter((state) => state.progress)
+    .map((state) => `${state.source} ${state.progress!.scanned}${state.progress!.total ? `/~${state.progress!.total}` : ""} read, MORE TO GO`);
+  const more = midPass.length ? ` — ${midPass.join(", ")}; sync_request continues the pass` : "";
+  if (synced.length === 0) {
+    return midPass.length
+      ? `inbox sync: first pass under way — ${midPass.join(", ")}; sync_request continues it${rest}`
+      : `inbox sync: never run for this board${rest}`;
+  }
   return `inbox sync: ${synced
-    .map((state) => `${state.source} through ${shortDate(state.syncedThrough)}${state.lastStatus === "failed" ? " (last run FAILED)" : ""}`)
-    .join(", ")}${rest}`;
+    .map(
+      (state) =>
+        `${state.source} through ${shortDate(state.syncedThrough)}` +
+        (state.lastStatus === "failed" && !state.progress ? " (last run FAILED)" : ""),
+    )
+    .join(", ")}${more}${rest}`;
 }
 
 export function renderSyncRun(run: SyncRunWithContext): string {
@@ -193,6 +207,8 @@ export function renderSyncRun(run: SyncRunWithContext): string {
       .map(
         (entry) =>
           `${entry.source} since ${shortDate(entry.since)}` +
+          (entry.batchLimit ? ` [max ${entry.batchLimit} chats]` : "") +
+          (entry.resumeFrom ? ` [resuming: ${entry.resumeFrom.scanned} done]` : "") +
           (entry.cappedFrom ? ` (capped; unread since ${shortDate(entry.cappedFrom)} is not retrievable)` : ""),
       )
       .join(", ")}`,
@@ -220,6 +236,14 @@ export function renderSyncState(sync: BoardSyncSummary): string {
         `  lastRun=${state.lastRunAt ? shortDate(state.lastRunAt) : "—"}` +
         `  lastStatus=${state.lastStatus ?? "—"}  importedTotal=${state.imported}`,
     );
+    if (state.progress) {
+      const { scanned, total, passCutoff } = state.progress;
+      lines.push(
+        `           PASS IN PROGRESS: ${scanned}${total ? ` of ~${total}` : ""} read, cutoff frozen at` +
+          ` ${shortDate(passCutoff)}. The watermark stays where it is until the pass finishes, and a` +
+          ` resuming batch ignores this source's minimum interval — so press Sync again to continue it.`,
+      );
+    }
     if (state.cooldownUntil && state.cooldownUntil > nowIso()) {
       lines.push(
         `           RESTING until ${shortDate(state.cooldownUntil)} after a rate limit — an ordinary` +

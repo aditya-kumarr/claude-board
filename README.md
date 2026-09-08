@@ -505,6 +505,33 @@ with its window, how long ago it closed, and how much of it got done. From there
 Archiving is also in the board's own `⋯` menu, and Claude can do it over MCP with
 `board_update archived=true`. Nothing about it touches a card.
 
+## Exporting a board
+
+The board's ⋯ menu has **Export to Excel** and **Export as CSV**, and both are plain URLs if you
+would rather script it:
+
+```bash
+curl -OJ 'http://localhost:4000/api/boards/<board id>/export?format=xlsx'
+curl 'http://localhost:4000/api/boards/<board id>/export?format=csv&summary=true'
+```
+
+One row per card — state, kind, assignee, priority, due, overdue, completed, blocked reason,
+comment / `@claude` / draft-reply counts, project, what it was imported from, and the full
+description — ordered the way the board reads, left to right by column and top to bottom within it.
+The filename carries the board and the date (`work-week-of-sep-7-2026-09-07.xlsx`).
+
+The `.xlsx` is the one worth opening: a styled frozen header row, the ID and Title columns frozen
+too, an autofilter, real dates rather than date-shaped strings, wrapped description cells, and
+**dropdowns on the fixed-set columns** — State offers this board's actual column names, Assignee its
+real users, plus Priority, Kind and Overdue. A second sheet carries the board's window and totals.
+
+Two things to know. Nothing imports these files back, so edits in the spreadsheet stay in the
+spreadsheet — the dropdowns are there to show the valid values and for your own working. And a
+leading `=`, `+`, `-` or `@` is prefixed with an apostrophe: cards are built out of mail and chat,
+so a subject line of `=HYPERLINK(...)` would otherwise be a live formula the moment you opened it.
+
+Claude can produce the CSV too, via `board_export`, when you want a board pasted somewhere.
+
 ## Logs
 
 One file per ISO week under `logs/`, e.g. `logs/2026-W34.log`. A long-running process

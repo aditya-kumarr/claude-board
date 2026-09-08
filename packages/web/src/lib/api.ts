@@ -151,6 +151,12 @@ export const api = {
   /** Drops the outstanding request, so a queue nothing is listening to can be cleared. */
   cancelSync: (boardId: string, reason?: string) =>
     request<SyncRun>(`/boards/${boardId}/sync`, { method: "DELETE", ...body({ reason }) }),
+  /**
+   * URL of the board as a spreadsheet. Returned rather than fetched: the browser
+   * has to navigate to it for the download to land as a file, and putting it
+   * through `fetch` would only buffer bytes we then have to hand back anyway.
+   */
+  exportUrl: (boardId: string, format: "csv" | "xlsx") => `/api/boards/${boardId}/export?format=${format}`,
   syncState: (boardId: string, limit = 10) =>
     request<BoardSyncSummary & { runs: SyncRun[] }>(`/boards/${boardId}/sync?limit=${limit}`),
 
