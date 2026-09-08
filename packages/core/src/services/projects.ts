@@ -31,6 +31,13 @@ const log = createLogger("projects");
  * own if it names one, otherwise its board's. Nothing is copied at creation time,
  * so re-pointing a board at a different checkout moves every card that never
  * overrode it.
+ *
+ * A project cannot be archived, and that is deliberate: the two states a *board*
+ * has -- closed but readable, and gone -- are not both real for a directory. An
+ * archived project was hidden from the pickers while still holding its path in
+ * the UNIQUE index, so the natural next act (register that directory again) came
+ * back as "already registered as ..." naming a row the user could no longer see.
+ * There is one way out instead, `deleteProject`, and it takes the work with it.
  */
 
 /** `~/Code/app` is what a person types; a row must hold what a process can open. */
@@ -142,8 +149,8 @@ export function createProject(input: CreateProjectInput, actor: ActorContext): P
   const now = new Date().toISOString();
   write((db) => {
     db.run(
-      `INSERT INTO projects (id, name, slug, path, description, archived, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
+      `INSERT INTO projects (id, name, slug, path, description, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [id, name, slug, path, input.description?.trim() || null, now, now],
     );
     record(db, actor, "project.created", {}, { projectId: id, name, slug, path });
@@ -189,7 +196,7 @@ export function requireProject(reference: string): Project {
     db.query<ProjectRow, [string]>("SELECT * FROM projects WHERE path = ? LIMIT 1").get(resolve(expandHome(raw)));
 
   if (!row) {
-    const known = listProjects({ includeArchived: true }).map((project) => project.slug);
+    const known = listProjects().map((project) => project.slug);
     throw notFound(
       `project '${reference}'${known.length ? ` (known projects: ${known.join(", ")})` : " (no projects registered yet)"}`,
     );
@@ -197,15 +204,9 @@ export function requireProject(reference: string): Project {
   return toProject(row);
 }
 
-export interface ListProjectsOptions {
-  includeArchived?: boolean;
-}
-
-export function listProjects(options: ListProjectsOptions = {}): Project[] {
+export function listProjects(): Project[] {
   return getDb()
-    .query<ProjectRow, []>(
-      `SELECT * FROM projects ${options.includeArchived ? "" : "WHERE archived = 0"} ORDER BY lower(name) ASC`,
-    )
+    .query<ProjectRow, []>("SELECT * FROM projects ORDER BY lower(name) ASC")
     .all()
     .map(toProject);
 }
@@ -214,7 +215,6 @@ export interface UpdateProjectInput {
   name?: string;
   path?: string;
   description?: string | null;
-  archived?: boolean;
 }
 
 export function updateProject(projectId: string, input: UpdateProjectInput, actor: ActorContext): Project {
@@ -260,12 +260,6 @@ export function updateProject(projectId: string, input: UpdateProjectInput, acto
     params.push(description);
     changed.description = description;
   }
-  if (input.archived !== undefined) {
-    sets.push("archived = ?");
-    params.push(input.archived ? 1 : 0);
-    changed.archived = input.archived;
-  }
-
   if (sets.length === 0) return existing;
 
   write((db) => {
@@ -281,44 +275,155 @@ export function updateProject(projectId: string, input: UpdateProjectInput, acto
   return getProject(projectId);
 }
 
+/** What a project delete would take with it. Read before the act, shown to the user. */
+export interface ProjectUsage {
+  projectId: string;
+  /** Boards whose default project is this one. Deleting the project deletes them. */
+  boards: { id: string; name: string; taskCount: number; archived: boolean }[];
+  /**
+   * Cards that name this project *themselves* while living on a board that does
+   * not — the ones a "delete the boards" summary would not account for.
+   */
+  tasks: { id: string; title: string; boardId: string; boardName: string }[];
+  /** Cards on the doomed boards plus the overriding cards above, counted once each. */
+  totalTasks: number;
+}
+
 /**
- * Unregisters a directory. Nothing on disk is touched, and no card is deleted:
- * `ON DELETE SET NULL` detaches every board and task pointing here, which the
- * count in the result names rather than leaving the user to discover.
+ * Everything that would go if this project were deleted.
+ *
+ * Its own queries again, for the reason at the top of the file — and it is a
+ * separate call rather than a field on `Project` because it is only ever wanted
+ * at the moment somebody reaches for the delete button, and it costs three
+ * counts.
  */
-export function deleteProject(projectId: string, actor: ActorContext): {
-  id: string;
-  detachedBoards: number;
-  detachedTasks: number;
-} {
+export function projectUsage(projectId: string): ProjectUsage {
   const project = getProject(projectId);
   const db = getDb();
-  const detachedBoards =
-    db.query<{ count: number }, [string]>("SELECT COUNT(*) AS count FROM boards WHERE project_id = ?").get(projectId)
-      ?.count ?? 0;
-  const detachedTasks =
-    db.query<{ count: number }, [string]>("SELECT COUNT(*) AS count FROM tasks WHERE project_id = ?").get(projectId)
-      ?.count ?? 0;
 
-  write((inner) => {
-    record(inner, actor, "project.deleted", {}, {
+  const boards = db
+    .query<{ id: string; name: string; archived: number; task_count: number }, [string]>(
+      `SELECT b.id, b.name, b.archived,
+              (SELECT COUNT(*) FROM tasks t WHERE t.board_id = b.id) AS task_count
+         FROM boards b
+        WHERE b.project_id = ?
+        ORDER BY lower(b.name) ASC`,
+    )
+    .all(project.id);
+
+  // `b.project_id IS NOT ?` rather than a plain inequality: a card overriding to
+  // this project on a board with *no* project must still be listed, and NULL
+  // compares false to everything under `!=`.
+  const tasks = db
+    .query<{ id: string; title: string; board_id: string; board_name: string }, [string, string]>(
+      `SELECT t.id, t.title, t.board_id, b.name AS board_name
+         FROM tasks t
+         JOIN boards b ON b.id = t.board_id
+        WHERE t.project_id = ? AND b.project_id IS NOT ?
+        ORDER BY b.name ASC, t.created_at ASC`,
+    )
+    .all(project.id, project.id);
+
+  const boardTasks = boards.reduce((sum, board) => sum + board.task_count, 0);
+  return {
+    projectId: project.id,
+    boards: boards.map((board) => ({
+      id: board.id,
+      name: board.name,
+      taskCount: board.task_count,
+      archived: board.archived === 1,
+    })),
+    tasks: tasks.map((task) => ({
+      id: task.id,
+      title: task.title,
+      boardId: task.board_id,
+      boardName: task.board_name,
+    })),
+    totalTasks: boardTasks + tasks.length,
+  };
+}
+
+export interface DeleteProjectOptions {
+  /**
+   * Consent to the cascade. Required — and only required — when something
+   * actually points at the project, so unregistering an unused directory stays a
+   * one-liner while deleting a live one is an act the caller had to mean.
+   */
+  confirmCascade?: boolean;
+}
+
+/**
+ * Deletes a project **and the work that pointed at it**: every board whose
+ * default project is this one (with its columns, cards and comments, via
+ * `ON DELETE CASCADE`) and every card that named this project itself.
+ *
+ * The cascade replaces an earlier `ON DELETE SET NULL` detach, and the reason is
+ * that a detached board was worse than either honest outcome — the cards stayed,
+ * silently no longer runnable inside any directory, and an `@claude` on one had
+ * nowhere to go. Since a project cannot be archived any more, delete is the only
+ * exit, so it says plainly what it takes and refuses to guess: with dependents
+ * and no `confirmCascade`, it is a `conflict` carrying the counts, which is what
+ * the UI puts behind its checkbox and what a tool call gets told to pass.
+ *
+ * Nothing on disk is touched. The directory outlives the row, which is why
+ * registering it again afterwards has to work.
+ */
+export function deleteProject(
+  projectId: string,
+  actor: ActorContext,
+  options: DeleteProjectOptions = {},
+): {
+  id: string;
+  deletedBoards: number;
+  deletedTasks: number;
+} {
+  const project = getProject(projectId);
+  const usage = projectUsage(project.id);
+  const deletedBoards = usage.boards.length;
+  const deletedTasks = usage.totalTasks;
+
+  if ((deletedBoards > 0 || deletedTasks > 0) && options.confirmCascade !== true) {
+    throw conflict(
+      `"${project.name}" is in use: deleting it also deletes ${deletedBoards} board(s) and ${deletedTasks} card(s). ` +
+        `Pass confirmCascade to go ahead.`,
+      {
+        projectId: project.id,
+        name: project.name,
+        path: project.path,
+        boards: usage.boards,
+        tasks: usage.tasks,
+        deletedBoards,
+        deletedTasks,
+        requiresConfirmation: "confirmCascade",
+      },
+    );
+  }
+
+  write((db) => {
+    record(db, actor, "project.deleted", {}, {
       projectId,
       name: project.name,
       path: project.path,
-      detachedBoards,
-      detachedTasks,
+      deletedBoards,
+      deletedTasks,
+      boards: usage.boards.map((board) => board.name),
     });
-    inner.run("DELETE FROM projects WHERE id = ?", [projectId]);
+    // Boards first: their cards, columns and comments go with them, so the
+    // second statement is left with exactly the overriding cards on other boards.
+    db.run("DELETE FROM boards WHERE project_id = ?", [projectId]);
+    db.run("DELETE FROM tasks WHERE project_id = ?", [projectId]);
+    db.run("DELETE FROM projects WHERE id = ?", [projectId]);
   });
 
-  log.warn("project unregistered", {
+  log.warn("project deleted", {
     projectId,
     name: project.name,
-    detachedBoards,
-    detachedTasks,
+    deletedBoards,
+    deletedTasks,
     actor: actor.actorId,
+    source: actor.source,
   });
-  return { id: projectId, detachedBoards, detachedTasks };
+  return { id: projectId, deletedBoards, deletedTasks };
 }
 
 /* ------------------------------------------------------- resolution for a card */
@@ -349,8 +454,8 @@ export const PROJECT_CONTEXT_COLUMNS = /* sql */ `
  * The directory work on this card should happen in — the card's own project if it
  * names one, otherwise its board's, and `null` when neither does.
  *
- * An archived project still resolves: archiving hides a directory from the
- * pickers, it does not orphan the cards already pointing at it.
+ * Never a dangling id: deleting a project deletes the boards and cards that
+ * pointed at it, so a row that resolves is a row that exists.
  */
 export function resolveProjectForTask(taskId: string): ResolvedProject | null {
   const row = getDb()

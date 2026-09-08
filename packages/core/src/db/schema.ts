@@ -413,6 +413,43 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE board_sync_state ADD COLUMN progress TEXT;
     `,
   },
+  {
+    version: 9,
+    name: "projects_no_archive",
+    sql: /* sql */ `
+      -- A project is not archivable, and the reason is that the two states a
+      -- board legitimately has -- "closed, keep it readable" and "gone" -- do not
+      -- both exist for a directory. An archived project was invisible in the
+      -- pickers while still holding its path in the UNIQUE index, so the one
+      -- thing a user does after retiring a directory -- register it again -- came
+      -- back as "already registered as ..." naming a project they could not see.
+      --
+      -- So there is one way out: delete, which now takes the boards and cards
+      -- with it (see deleteProject) rather than silently detaching them.
+      ALTER TABLE projects DROP COLUMN archived;
+    `,
+  },
+  {
+    version: 10,
+    name: "comment_kind",
+    sql: /* sql */ `
+      -- What a comment IS, not just what it says. A long unattended run leaves a
+      -- trail of comments in the thread, and the two the human actually needs --
+      -- "I am stuck" and "here is what I did" -- must not read as four more
+      -- paragraphs of narration they have to spot by eye. The same reasoning the
+      -- sync summary uses: a fact the user has to act on is state, not prose.
+      --
+      --   note     the default, and everything a human writes
+      --   progress a step in work under way -- what is being done, what got done
+      --   blocker  the run cannot proceed and is saying so, mid-flight
+      --   result   the outcome of a tracked request, written by mention_resolve
+      --
+      -- Defaulted rather than backfilled per author: every comment written before
+      -- this migration was a note in the only sense that existed at the time.
+      ALTER TABLE task_comments ADD COLUMN kind TEXT NOT NULL DEFAULT 'note'
+        CHECK (kind IN ('note','progress','blocker','result'));
+    `,
+  },
 ];
 
 /** Assignees exist before any board does, so both transports can reference them. */

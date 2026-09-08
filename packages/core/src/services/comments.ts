@@ -3,7 +3,7 @@ import { getDb } from "../db/index.ts";
 import { toComment, type CommentRow } from "../db/rows.ts";
 import { badRequest, notFound } from "../lib/errors.ts";
 import { newId } from "../lib/ids.ts";
-import type { TaskComment } from "../types.ts";
+import type { CommentKind, TaskComment } from "../types.ts";
 import { record } from "./activity.ts";
 import type { ActorContext } from "./context.ts";
 
@@ -21,27 +21,37 @@ export function requireCommentBody(value: unknown): string {
   return text;
 }
 
-/** Appends one comment inside the caller's transaction. */
+/**
+ * Appends one comment inside the caller's transaction.
+ *
+ * `kind` defaults to `note`, which is what a person writing in the box means and
+ * what every comment was before migration 10. The other kinds are Claude
+ * narrating a job — see `CommentKind`.
+ */
 export function insertComment(
   db: Database,
   target: { taskId: string; boardId: string },
   body: string,
   actor: ActorContext,
+  kind: CommentKind = "note",
 ): TaskComment {
   const text = requireCommentBody(body);
   const id = newId("cmt");
   const createdAt = new Date().toISOString();
 
-  db.run("INSERT INTO task_comments (id, task_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)", [
+  db.run("INSERT INTO task_comments (id, task_id, author_id, body, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)", [
     id,
     target.taskId,
     actor.actorId,
     text,
+    kind,
     createdAt,
   ]);
-  record(db, actor, "task.commented", target, { commentId: id, chars: text.length });
+  // `kind` rides in the activity detail because the audit trail is where "when
+  // did it say it was stuck" gets answered after the fact.
+  record(db, actor, "task.commented", target, { commentId: id, kind, chars: text.length });
 
-  return { id, taskId: target.taskId, authorId: actor.actorId, body: text, createdAt };
+  return { id, taskId: target.taskId, authorId: actor.actorId, body: text, kind, createdAt };
 }
 
 /**

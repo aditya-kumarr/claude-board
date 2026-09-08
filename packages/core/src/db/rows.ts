@@ -3,6 +3,7 @@ import type {
   Board,
   BoardColumn,
   ColumnKind,
+  CommentKind,
   DurationKind,
   BoardSyncState,
   Mention,
@@ -47,7 +48,6 @@ export interface ProjectRow {
   slug: string;
   path: string;
   description: string | null;
-  archived: number;
   created_at: string;
   updated_at: string;
 }
@@ -96,6 +96,7 @@ export interface CommentRow {
   task_id: string;
   author_id: string;
   body: string;
+  kind: string;
   created_at: string;
 }
 export interface MentionRow {
@@ -229,7 +230,6 @@ export const toProject = (row: ProjectRow): Project => ({
   slug: row.slug,
   path: row.path,
   description: row.description,
-  archived: row.archived === 1,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
@@ -307,6 +307,9 @@ export const toComment = (row: CommentRow): TaskComment => ({
   taskId: row.task_id,
   authorId: row.author_id,
   body: row.body,
+  // Rows written before migration 10 have the column's default, so this is a
+  // cast rather than a parse — the CHECK constraint is what keeps it true.
+  kind: (row.kind ?? "note") as CommentKind,
   createdAt: row.created_at,
 });
 

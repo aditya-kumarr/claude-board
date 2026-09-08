@@ -6,11 +6,13 @@ import {
   type BoardColumn,
   type BoardDetail,
   type BoardSyncSummary,
+  type CommentKind,
   type IntakeAttachment,
   type IntakeMessageWithContext,
   type IntakeMessageWithFiles,
   type MentionWithContext,
   type Project,
+  type ProjectUsage,
   type ResolvedProject,
   type ResponseTurn,
   type ResponseTurnWithContext,
@@ -92,7 +94,7 @@ export function renderProjects(projects: Project[]): string {
     "",
     ...projects.map((project) =>
       [
-        `  ${project.slug}  (${project.id})${project.archived ? "  [archived]" : ""}`,
+        `  ${project.slug}  (${project.id})`,
         `    name: ${project.name}`,
         `    path: ${project.path}${projectPathExists(project.path) ? "" : "  !! MISSING"}`,
         project.description ? `    what it is: ${project.description}` : null,
@@ -104,6 +106,43 @@ export function renderProjects(projects: Project[]): string {
     "Attach one with board_update project=<slug> (the default for every card on a board)",
     "or task_update project=<slug> (this card only). An @claude request on a card with a",
     "project is carried out inside that directory.",
+  ].join("\n");
+}
+
+/**
+ * What `project_delete` would take with it, named rather than counted.
+ *
+ * A project has no archived state, so removing one is a cascade — and a count is
+ * not something the user can consent to. Their own board names are.
+ */
+export function renderProjectUsage(project: Project, usage: ProjectUsage): string {
+  if (usage.boards.length === 0 && usage.totalTasks === 0) {
+    return (
+      `Nothing points at ${project.slug} (${project.path}).\n` +
+      `project_delete removes just the registration — no board or card is affected.`
+    );
+  }
+  return [
+    `Deleting ${project.slug} (${project.path}) would also delete:`,
+    "",
+    ...(usage.boards.length > 0
+      ? [
+          `  ${usage.boards.length} board(s), with everything on them:`,
+          ...usage.boards.map(
+            (board) => `    ${board.name}  (${board.id})  ${board.taskCount} card(s)${board.archived ? "  [archived]" : ""}`,
+          ),
+        ]
+      : []),
+    ...(usage.tasks.length > 0
+      ? [
+          `  ${usage.tasks.length} card(s) on other boards that name this project themselves:`,
+          ...usage.tasks.map((task) => `    ${task.title}  (${task.id})  on ${task.boardName}`),
+        ]
+      : []),
+    "",
+    `${usage.totalTasks} card(s) in total. Nothing in ${project.path} is touched — only the board app's rows.`,
+    "Not reversible. Get the user's word before calling project_delete confirmCascade=true.",
+    "To keep the work and only move where it runs, use project_update path=<new directory> instead.",
   ].join("\n");
 }
 
@@ -274,10 +313,26 @@ export function renderTaskList(tasks: TaskWithContext[], heading: string): strin
   return lines.join("\n");
 }
 
+/**
+ * A comment's `kind` is tagged rather than dropped: a thread from an unattended
+ * run is mostly its own narration, and a later run reading the card needs to see
+ * at a glance which line was somebody asking for something and which was itself
+ * reporting a step — most of all which one said it was stuck.
+ */
+const COMMENT_KIND_TAG: Record<CommentKind, string> = {
+  note: "",
+  progress: " (progress)",
+  blocker: " (BLOCKED)",
+  result: " (result)",
+};
+
 export function renderComments(comments: TaskComment[]): string {
   if (comments.length === 0) return "  (no comments)";
   return comments
-    .map((comment) => `  [${shortDate(comment.createdAt)}] ${who(comment.authorId)}: ${comment.body}`)
+    .map(
+      (comment) =>
+        `  [${shortDate(comment.createdAt)}] ${who(comment.authorId)}${COMMENT_KIND_TAG[comment.kind] ?? ""}: ${comment.body}`,
+    )
     .join("\n");
 }
 

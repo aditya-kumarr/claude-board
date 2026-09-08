@@ -37,6 +37,7 @@
 // the package alias is not resolvable here. Same reason `bun run typecheck` does
 // not cover this file — see the note in README.
 import {
+  addComment,
   createLogger,
   getDb,
   getMention,
@@ -102,11 +103,39 @@ function requestBlock(mention: MentionWithContext): string[] {
   ].filter((line): line is string => line !== null);
 }
 
+/**
+ * The reporting contract, in both prompts.
+ *
+ * The person who wrote the `@claude` is not in a session — the card's thread is
+ * the whole of what they can see, and until something appears in it a run that is
+ * working and a run that died look exactly alike. So the run narrates: the plan
+ * first, then each step as it lands, and a blocker the moment there is one rather
+ * than at the end. `mention_claim` says the same thing when the job is picked up,
+ * because a rule read here and a rule read half an hour of work later are not the
+ * same rule.
+ */
+const reportingRules = (taskId: string) => [
+  "REPORT AS YOU GO. Nobody is watching this run; they are watching the card.",
+  "",
+  `  - First, before doing anything else: task_comment ${taskId} kind=progress with what you take the`,
+  "    ask to mean and the steps you are about to take. That comment is what tells them you picked it up.",
+  "  - Then one more each time a step actually lands — what you did and what you found, naming real",
+  '    things: files, ids, numbers, commands. "Working on it" tells them nothing they did not know.',
+  `  - The moment you are stuck: task_comment ${taskId} kind=blocker saying what would unblock you, then`,
+  "    and not at the end. If the work itself is stuck, task_move the card to a blocked state with a",
+  "    blockedReason too, so the board and the thread agree.",
+  "  - Comment bodies render as markdown, so use lists, `code` and **bold** where they earn it.",
+  "",
+  "Use judgement about how many: a one-step request wants one comment and its resolution, not five.",
+  "The test is whether somebody who reads only this thread can say what happened.",
+];
+
 const closingRules = [
   "You are running unattended — there is nobody to ask a follow-up question. If the request is",
   "ambiguous, take the most reasonable reading, do it, and state the assumption in the resolution.",
   "If it should not be done, resolve it as dismissed with the reason. If it needs a human, resolve it",
-  "as dismissed explaining what you need. Do not finish while the request is still open.",
+  "as dismissed explaining what you need — and post the blocker on the card as well, so the reason sits",
+  "in the thread rather than only in the resolution line. Do not finish while the request is still open.",
 ];
 
 /**
@@ -119,10 +148,14 @@ function buildPrompt(mention: MentionWithContext): string {
     "",
     "Do this now, using the board MCP tools:",
     `  1. mention_claim ${mention.id} — returns the card and its full comment thread.`,
-    "  2. Carry out what was asked. Use task_update / task_move / task_create / task_comment as needed;",
-    "     if answering it means reading this repository, you have read-only file tools.",
-    `  3. mention_resolve ${mention.id} with a one-line resolution of what you actually did.`,
-    "     That text is posted back into the thread, so write it for the person who asked.",
+    `  2. Post your plan: task_comment ${mention.taskId} kind=progress.`,
+    "  3. Carry out what was asked, commenting each step as it lands. Use task_update / task_move /",
+    "     task_create / task_comment as needed; if answering it means reading this repository, you have",
+    "     read-only file tools.",
+    `  4. mention_resolve ${mention.id} with a one-line resolution of what you actually did.`,
+    "     That text is posted back into the thread as the last word, so write it for the person who asked.",
+    "",
+    ...reportingRules(mention.taskId),
     "",
     ...closingRules,
   ].join("\n");
@@ -155,10 +188,16 @@ function buildProjectPrompt(mention: MentionWithContext): string {
     "",
     "Do this now:",
     `  1. mention_claim ${mention.id} — returns the card and its full comment thread.`,
-    "  2. Do the work in this directory.",
-    `  3. mention_resolve ${mention.id} saying what you actually changed, naming the files.`,
-    "     That text is posted into the card's thread and is all the person who asked will see,",
-    "     so it has to stand on its own — 'done' tells them nothing they can check.",
+    `  2. Post your plan: task_comment ${mention.taskId} kind=progress — what you take the ask to mean and`,
+    "     how you intend to approach it. Do this before you start reading the codebase, not after.",
+    "  3. Do the work in this directory, commenting each step as it lands: what you found, what you",
+    "     changed, what the project's own checks said. A run in here can last half an hour, and a silent",
+    "     half hour is indistinguishable from a crash to the person waiting.",
+    `  4. mention_resolve ${mention.id} saying what you actually changed, naming the files.`,
+    "     That is the last word on the request, so it has to stand on its own — 'done' tells them",
+    "     nothing they can check.",
+    "",
+    ...reportingRules(mention.taskId),
     "",
     "Rules for this run:",
     "  - Do NOT commit, push, or open a pull request unless the request explicitly asked for it.",
@@ -207,6 +246,26 @@ function dispatchFor(mention: MentionWithContext): {
   };
 }
 
+/**
+ * The watcher's own voice in the thread.
+ *
+ * A spawned run narrates its own work; these two are for the things only the
+ * watcher knows — that a run died, that it is out of attempts, that the directory
+ * it was to run in is gone. Wrapped because a comment that fails to write must
+ * not take the bookkeeping around it down with it: releasing or resolving the
+ * request matters more than saying so.
+ */
+function postComment(mention: MentionWithContext, body: string, kind: "progress" | "blocker"): void {
+  try {
+    addComment(mention.taskId, body, watcher, kind);
+  } catch (error) {
+    log.error("could not post watcher comment", { mentionId: mention.id, taskId: mention.taskId, kind, error });
+  }
+}
+
+const postProgress = (mention: MentionWithContext, body: string) => postComment(mention, body, "progress");
+const postBlocker = (mention: MentionWithContext, body: string) => postComment(mention, body, "blocker");
+
 /** Spawns a run for one request and makes sure it does not end up in limbo. */
 async function handle(mention: MentionWithContext, mcpConfig: string, attempt: number): Promise<void> {
   const dispatch = dispatchFor(mention);
@@ -222,15 +281,21 @@ async function handle(mention: MentionWithContext, mcpConfig: string, attempt: n
       project: mention.project.slug,
       path: mention.project.path,
     });
+    // A blocker, not a footnote on a dismissal: there is a thing the user has to
+    // do before this request can go anywhere, and the thread is where they will
+    // look for it. The resolution below stays the audit record.
+    postBlocker(
+      mention,
+      [
+        `**I could not start this.** ${reason}, so there is nothing for me to work in.`,
+        "",
+        `**To unblock it:** point the \`${mention.project.name}\` project at the right directory ` +
+          "(Projects → edit → path), or detach it from this card, then ask again.",
+      ].join("\n"),
+    );
     resolveMention(
       mention.id,
-      {
-        status: "dismissed",
-        resolution: `could not run: ${reason}`,
-        reply:
-          `I could not pick this up: ${reason}, so there is nothing for me to work in. ` +
-          `Point the "${mention.project.name}" project at the right directory (or detach it from this card) and ask again.`,
-      },
+      { status: "dismissed", resolution: `could not run: ${reason}`, reply: null },
       watcher,
     );
     say(`  ✗ ${mention.id}: ${reason}`);
@@ -279,16 +344,37 @@ async function handle(mention: MentionWithContext, mcpConfig: string, attempt: n
   }
 
   if (attempt >= MAX_ATTEMPTS) {
-    // Give up loudly. Silence here is the one outcome the human cannot act on.
-    const note =
-      `I could not complete this automatically after ${attempt} attempt(s), so it is still open. ` +
-      `Last output: ${result.summary.slice(0, 800)}`;
+    // Give up loudly. Silence here is the one outcome the human cannot act on,
+    // and a run that ran out of attempts is a blocker in the plainest sense:
+    // the work is not done and only a person can move it on.
+    postBlocker(
+      mention,
+      [
+        `**I could not finish this automatically** after ${attempt} attempt(s), so the work is not done.`,
+        "",
+        "The last thing the run said:",
+        "",
+        "```",
+        result.summary.slice(0, 800),
+        "```",
+        "",
+        "Any progress above is real and stands. Ask again with `@claude` once the cause is dealt with.",
+      ].join("\n"),
+    );
     resolveMention(
       mention.id,
-      { status: "dismissed", resolution: `automated handling failed after ${attempt} attempt(s)`, reply: note },
+      { status: "dismissed", resolution: `automated handling failed after ${attempt} attempt(s)`, reply: null },
       watcher,
     );
     say(`  ✗ gave up after ${attempt} attempt(s); left a note on the card`);
+  } else {
+    // Between attempts, say so. The thread otherwise shows one run's steps
+    // stopping mid-sentence and a second run starting its plan over, with
+    // nothing to explain the seam.
+    postProgress(
+      mention,
+      `That attempt stopped after ${seconds}s without finishing. Picking it up again (attempt ${attempt + 1} of ${MAX_ATTEMPTS}).`,
+    );
   }
 }
 

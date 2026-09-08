@@ -13,6 +13,7 @@ import type {
   MentionWithContext,
   Priority,
   Project,
+  ProjectUsage,
   ResponseStage,
   ResponseStatus,
   ResponseTurnWithContext,
@@ -109,16 +110,22 @@ export const api = {
    * browser: the path is validated there, which is why an invalid one comes back
    * as a 400 rather than being caught in the form.
    */
-  listProjects: (includeArchived = false) =>
-    request<{ projects: Project[] }>(`/projects?includeArchived=${includeArchived}`),
+  listProjects: () => request<{ projects: Project[] }>("/projects"),
   createProject: (payload: ProjectPayload) => request<Project>("/projects", { method: "POST", ...body(payload) }),
-  updateProject: (projectId: string, patch: Partial<ProjectPayload> & { archived?: boolean }) =>
+  updateProject: (projectId: string, patch: Partial<ProjectPayload>) =>
     request<Project>(`/projects/${projectId}`, { method: "PATCH", ...body(patch) }),
-  /** Unregisters the directory. Nothing on disk is touched; cards are detached. */
-  deleteProject: (projectId: string) =>
-    request<{ id: string; detachedBoards: number; detachedTasks: number }>(`/projects/${projectId}`, {
-      method: "DELETE",
-    }),
+  /** The boards and cards a delete would take with it. Read before offering the button. */
+  projectUsage: (projectId: string) => request<ProjectUsage>(`/projects/${projectId}/usage`),
+  /**
+   * Deletes the project *and* the boards and cards that pointed at it. Nothing on
+   * disk is touched. Without `confirmCascade` the API refuses with a 409 whenever
+   * anything points at it, so the checkbox is not the only guard.
+   */
+  deleteProject: (projectId: string, options: { confirmCascade?: boolean } = {}) =>
+    request<{ id: string; deletedBoards: number; deletedTasks: number }>(
+      `/projects/${projectId}?confirmCascade=${options.confirmCascade === true}`,
+      { method: "DELETE" },
+    ),
 
   listBoards: (includeArchived = false) =>
     request<{ boards: BoardDetail[] }>(`/boards?includeArchived=${includeArchived}`),

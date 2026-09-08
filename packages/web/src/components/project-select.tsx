@@ -33,9 +33,10 @@ export function ProjectSelect({
 }) {
   const inheritable = inheritFrom !== undefined;
   const fallback = inheritable ? INHERIT_PROJECT : NO_PROJECT;
-  // An archived project stays listed while a card still points at it: hiding the
-  // option would silently reassign the card the next time anyone touched the form.
-  const options = projects.filter((project) => !project.archived || project.id === value);
+  // Every registered project is offered: there is no hidden state a project can be
+  // in, and a card can only point at one that exists — deleting a project deletes
+  // the cards that named it rather than leaving them holding a stale id.
+  const options = projects;
 
   return (
     <Select value={value ?? fallback} onValueChange={(next) => onChange(next === fallback ? null : next)}>

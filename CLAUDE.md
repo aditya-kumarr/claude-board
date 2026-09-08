@@ -87,6 +87,21 @@ go through `write()` or the UI will not notice it.
   parse idempotent. Lifecycle is `pending → claimed → answered|dismissed`, and resolving posts
   the resolution back into the thread by default — a request answered with silence in the thread
   is indistinguishable from one that was ignored.
+- **A run carrying out a request narrates it, and `task_comments.kind` is what makes that
+  readable.** Resolving posts one comment at the end, which is fine for a question and useless for
+  a half-hour run in a project: until it lands, a run that is working and a run that died look
+  identical to the person watching the card. So the run comments as it goes, and each comment says
+  what it *is* — `note` (the default, and everything a human writes), `progress` (a step: what is
+  being done, what got done), `blocker` (it cannot go on, said mid-flight), `result` (written by
+  `mention_resolve` whichever way the request went; answered-vs-dismissed is already carried by the
+  mention's own status). The kind is a column rather than a prose convention for the reason the
+  sync summary is structured: a blocker that reads as one more paragraph of narration is a blocker
+  the user scrolls past, and it is the one comment in a thread asking *them* to do something.
+  `task_comment` refuses `kind=result` — that one is `mention_resolve`'s to write. The contract is
+  stated in **both** the watcher's prompt and `mention_claim`'s response, because a rule read at
+  spawn time and a rule read at the moment of acting are not the same rule. The watcher writes the
+  two comments only it can: a `blocker` when the project directory is gone or the attempts ran out,
+  and a `progress` between attempts, so a thread that stops mid-sentence and starts over says why.
 - **A sync watermark only moves on success.** `board_sync_state` holds one `synced_through` per
   (board, source); a run scans `(synced_through, cutoff]` and `completeSyncRun` advances it *only*
   for `status: "ok"`, so a failed or abandoned run re-reads its window instead of leaving a hole.
@@ -187,6 +202,18 @@ go through `write()` or the UI will not notice it.
   is what makes it load-bearing: **an `@claude` on a card with a project is carried out inside
   that directory**, so registering one is the act of granting an unattended run write access to
   it — which is why it is a deliberate step in the UI and never inferred from a path in a comment.
+- **A project cannot be archived, and deleting one deletes the work that pointed at it.** Archiving
+  a project was the shape a board's archive has, and it was wrong for a directory: the row stayed
+  invisible in the pickers while still holding its path in `idx_projects_path`, so the one thing a
+  user does after retiring a directory — register it again — came back as *"already registered as
+  ..."* naming a project they could no longer see. Migration 9 drops the column. That leaves delete
+  as the only exit, so it is honest about its scope instead of the old `ON DELETE SET NULL`: it
+  removes every board whose default project is this one (with its columns, cards and comments, by
+  cascade) and every card that named the project *itself*, and `projectUsage()` is the read that
+  names them all first. `deleteProject` **refuses without `confirmCascade`** whenever anything
+  points at the project — a `conflict` carrying the boards and cards — which is what puts the same
+  guard behind the UI's checkbox and behind a tool call. Nothing on disk is touched, and that is
+  the point: the directory outlives the row, so registering it again has to work.
 - **`tasks.source_ref` is what makes a sync re-runnable.** Unique per board via a partial index;
   `createTask` looks it up first so the caller gets a `conflict` naming `existingTaskId` instead
   of an opaque constraint violation or a duplicate card.
@@ -266,12 +293,16 @@ the current message in full and the card, so one call is enough to act.
 card's worth of prose per row makes it far bulkier than `board_get` — so its description says as
 much, and points at the UI for the `.xlsx` version it cannot produce.
 
-`project_list` / `project_add` / `project_update` / `project_delete` register the directories work
-can be delegated into; a card or board is pointed at one through `task_update` / `board_update`'s
-`project` argument rather than a tool of its own, because attaching is an edit to the card. Every
-render that a run acts on — `board_get`, `task_get`, `mention_claim` — carries the resolved path and
-says whether the directory still exists, since a stale path is otherwise discovered only as a
-failure the model cannot diagnose.
+`project_list` / `project_add` / `project_update` / `project_usage_check` / `project_delete` register
+the directories work can be delegated into; a card or board is pointed at one through `task_update` /
+`board_update`'s `project` argument rather than a tool of its own, because attaching is an edit to the
+card. Every render that a run acts on — `board_get`, `task_get`, `mention_claim` — carries the
+resolved path and says whether the directory still exists, since a stale path is otherwise discovered
+only as a failure the model cannot diagnose. There is no `archived` argument, because a project has no
+such state; `project_delete` takes the project's boards and cards with it and needs `confirmCascade`,
+which is why `project_usage_check` exists — it names the boards and cards in the user's own words so
+the model can ask before spending them rather than reporting a count afterwards. A directory that has
+merely *moved* is a `project_update path=…`, not a delete.
 
 `intake_pending` / `intake_claim` / `intake_complete` are the intake tools, and `my_queue` carries a
 third banner for them. `intake_claim` is the widest job spec in the server: the pasted text in full,
@@ -424,6 +455,18 @@ shadcn-style primitives in `components/ui/`. Colours come from CSS variables onl
 
 Drag-and-drop is native HTML5 (no dnd library). The drop index is computed from the pointer's
 position against each card's midpoint in `board-column.tsx`.
+
+**Claude's comments are markdown; the human's are not.** `components/markdown.tsx` parses the
+subset an agent writing a status update actually uses — headings, nested lists, fenced and inline
+code, tables, quotes, links — and is hand-written for one reason that is not taste: mention
+highlighting has to happen *inside* the text nodes, and the regex doing it must stay the single
+copy that agrees with core's parser, so `mention-text.tsx` exports the split and the markdown
+renderer calls it on every run of plain text. A human's note stays plain text with mentions picked
+out: they type into a box with no formatting affordance and no preview, so reinterpreting their
+asterisks would be a change they did not ask for. The thread also refetches on `revisionKey`
+rather than on `task.updatedAt` — a comment does not touch the task row, so keying it off the
+card's own timestamp meant a run's progress never reached the dialog the user had open while it
+worked.
 
 **The Sync settings panel configures one press, not a stored preference.**
 `sync-settings.tsx` picks the sources, optionally overrides the start date, and can force past a

@@ -151,7 +151,6 @@ export interface Project {
   path: string;
   /** What the codebase is, in the user's words. Travels in a delegated prompt. */
   description: string | null;
-  archived: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -236,11 +235,28 @@ export interface Task {
   updatedAt: string;
 }
 
+/**
+ * What a comment is, beyond what it says.
+ *
+ * A human always writes a `note`. The other three are Claude narrating a job it
+ * was given: `progress` while it works, `blocker` the moment it cannot go on,
+ * `result` when the request is closed out. The distinction is load-bearing
+ * rather than decorative — an unattended run can leave a dozen comments on one
+ * card, and "I am stuck on the missing credential" has to be findable in that
+ * without the human reading all of them.
+ */
+export const COMMENT_KINDS = ["note", "progress", "blocker", "result"] as const;
+export type CommentKind = (typeof COMMENT_KINDS)[number];
+
+/** Kinds only an agent narrating its own work should write. */
+export const AGENT_COMMENT_KINDS: readonly CommentKind[] = ["progress", "blocker", "result"];
+
 export interface TaskComment {
   id: string;
   taskId: string;
   authorId: string;
   body: string;
+  kind: CommentKind;
   createdAt: string;
 }
 

@@ -5,7 +5,15 @@ import { buildWindow, parseDate } from "../lib/duration.ts";
 import { badRequest, conflict, notFound } from "../lib/errors.ts";
 import { newId } from "../lib/ids.ts";
 import { createLogger } from "../lib/logger.ts";
-import { PRIORITIES, type Mention, type Priority, type ResolvedProject, type Task, type TaskComment } from "../types.ts";
+import {
+  PRIORITIES,
+  type CommentKind,
+  type Mention,
+  type Priority,
+  type ResolvedProject,
+  type Task,
+  type TaskComment,
+} from "../types.ts";
 import { record } from "./activity.ts";
 import { assertDueWithinBoard, getBoard } from "./boards.ts";
 import { getColumn, listColumns, resolveColumn } from "./columns.ts";
@@ -462,12 +470,21 @@ export interface AddCommentResult {
  * parse happens here, in the one write path both transports share, so a note
  * left in the web UI and a note left over MCP raise a request identically.
  */
-export function addCommentWithMentions(taskId: string, body: string, actor: ActorContext): AddCommentResult {
+export function addCommentWithMentions(
+  taskId: string,
+  body: string,
+  actor: ActorContext,
+  kind: CommentKind = "note",
+): AddCommentResult {
   const task = getTask(taskId);
   const target = { taskId, boardId: task.boardId };
 
   const result = write((db) => {
-    const comment = insertComment(db, target, body, actor);
+    const comment = insertComment(db, target, body, actor, kind);
+    // Parsed for every kind, not just notes: the guard that an actor never
+    // enqueues a mention of itself already makes Claude's own narration inert,
+    // and skipping the parse here would silently drop a genuine "@claude" that
+    // one agent left for another in a progress note.
     const mentions = recordMentions(db, { ...target, commentId: comment.id }, comment.body, actor);
     return { comment, mentions };
   });
@@ -475,6 +492,7 @@ export function addCommentWithMentions(taskId: string, body: string, actor: Acto
   log.info("comment added", {
     taskId,
     commentId: result.comment.id,
+    kind,
     mentions: result.mentions.length,
     actor: actor.actorId,
     source: actor.source,
@@ -484,8 +502,13 @@ export function addCommentWithMentions(taskId: string, body: string, actor: Acto
 }
 
 /** Comment-only view of the above, for callers that do not care about mentions. */
-export function addComment(taskId: string, body: string, actor: ActorContext): TaskComment {
-  return addCommentWithMentions(taskId, body, actor).comment;
+export function addComment(
+  taskId: string,
+  body: string,
+  actor: ActorContext,
+  kind: CommentKind = "note",
+): TaskComment {
+  return addCommentWithMentions(taskId, body, actor, kind).comment;
 }
 
 /** Task plus everything needed to act on it without further lookups. */

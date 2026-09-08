@@ -21,9 +21,24 @@ export interface Project {
   slug: string;
   path: string;
   description: string | null;
-  archived: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * What deleting a project would take with it.
+ *
+ * A project has no archived state — the one that existed hid the directory from
+ * the pickers while it still held its path, so re-registering it came back as
+ * "already registered" naming a row the user could not see. Delete is the only
+ * exit, and it deletes the work too, so the dialog reads this first and names it.
+ */
+export interface ProjectUsage {
+  projectId: string;
+  boards: { id: string; name: string; taskCount: number; archived: boolean }[];
+  /** Cards that name this project themselves, on boards that do not. */
+  tasks: { id: string; title: string; boardId: string; boardName: string }[];
+  totalTasks: number;
 }
 
 /** Where a card's project came from: the card names one, or its board does. */
@@ -99,11 +114,19 @@ export interface TaskWithContext extends Task {
   project: ResolvedProject | null;
 }
 
+/**
+ * Mirrors core's `CommentKind`. A human always writes `note`; the rest are Claude
+ * narrating a job it was given, and the thread renders them differently because a
+ * blocker the user has to scan for is a blocker they will miss.
+ */
+export type CommentKind = "note" | "progress" | "blocker" | "result";
+
 export interface TaskComment {
   id: string;
   taskId: string;
   authorId: string;
   body: string;
+  kind: CommentKind;
   createdAt: string;
 }
 

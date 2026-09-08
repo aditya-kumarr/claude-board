@@ -1,5 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AtSign, Ban, Check, Clock, FolderGit2, Loader2, Pencil, Send, Sparkles, Trash2, User as UserIcon } from "lucide-react";
+import {
+  AlertTriangle,
+  AtSign,
+  Ban,
+  Check,
+  CircleDashed,
+  Clock,
+  FolderGit2,
+  Loader2,
+  Pencil,
+  Send,
+  Sparkles,
+  Trash2,
+  User as UserIcon,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input, Textarea } from "@/components/ui/input";
@@ -8,6 +22,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Avatar, Separator } from "@/components/ui/misc";
 import { Badge } from "@/components/ui/badge";
 import { Hint } from "@/components/ui/tooltip";
+import { Markdown } from "@/components/markdown";
 import { agentHandles, hasAgentMention, MentionText } from "@/components/mention-text";
 import { ProjectSelect, shortPath } from "@/components/project-select";
 import { ResponseBoxes } from "@/components/response-boxes";
@@ -22,6 +37,7 @@ import {
   type BoardDetail,
   type MentionStatus,
   type MentionWithContext,
+  type CommentKind,
   type Priority,
   type Project,
   type TaskComment,
@@ -39,6 +55,20 @@ const MENTION_TINT: Record<MentionStatus, string> = {
   claimed: "var(--primary)",
   answered: "var(--kind-done)",
   dismissed: "var(--muted-foreground)",
+};
+
+/**
+ * How each kind of comment reads in the thread.
+ *
+ * `note` gets no chrome at all — most of the thread is notes, and a badge on
+ * every one of them is a badge on none of them. The other three are Claude
+ * narrating a job, and `blocker` is the one the whole treatment exists for: it
+ * is the only comment in a thread that is asking the user to do something.
+ */
+const COMMENT_KIND: Record<Exclude<CommentKind, "note">, { label: string; tint: string; icon: typeof Check }> = {
+  progress: { label: "Progress", tint: "var(--kind-active)", icon: CircleDashed },
+  blocker: { label: "Blocked", tint: "var(--kind-blocked)", icon: AlertTriangle },
+  result: { label: "Result", tint: "var(--kind-done)", icon: Check },
 };
 
 export interface TaskDialogProps {
@@ -80,6 +110,9 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
   const [draft, setDraft] = useState("");
   const [posting, setPosting] = useState(false);
   const draftRef = useRef<HTMLTextAreaElement>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
+  /** Was the thread scrolled to the bottom before this render? */
+  const threadPinnedRef = useRef(true);
 
   const [responses, setResponses] = useState<TaskResponseSummary>({ responses: [], activeDraftTurn: null });
   const [openResponseId, setOpenResponseId] = useState<string | null>(null);
@@ -101,6 +134,7 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
   useEffect(() => {
     setEditing(false);
     setOpenResponseId(null);
+    threadPinnedRef.current = true;
   }, [taskId]);
 
   useEffect(() => {
@@ -109,8 +143,14 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
     setDescription(task.description ?? "");
   }, [task?.id, task?.title, task?.description]);
 
-  // Re-runs on the board's revision-driven refetch too, so a request Claude
-  // answered from an MCP session lands in an open dialog without a reload.
+  /**
+   * The thread, re-read on every remote change.
+   *
+   * `revisionKey` is the load-bearing dependency, not `task.updatedAt`: posting a
+   * comment does not touch the task row, so keying this off the card's own
+   * timestamp meant a run's progress comments did not appear in a dialog the user
+   * had open — which is exactly the dialog they have open while it works.
+   */
   useEffect(() => {
     if (!taskId) return;
     let cancelled = false;
@@ -128,7 +168,21 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
     return () => {
       cancelled = true;
     };
-  }, [taskId, task?.updatedAt, board?.openMentions.length]);
+  }, [taskId, task?.updatedAt, board?.openMentions.length, revisionKey]);
+
+  /**
+   * Keeps the newest comment in view as a run narrates, but only when the user is
+   * already at the bottom — yanking the thread down while they are reading back
+   * through what happened is worse than making them scroll.
+   *
+   * Whether they were at the bottom is recorded as they scroll rather than
+   * measured here: by the time this runs the new comment is already laid out, so
+   * the distance to the bottom is the height of the thing that just arrived.
+   */
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (thread && threadPinnedRef.current) thread.scrollTop = thread.scrollHeight;
+  }, [comments]);
 
   /**
    * The card's draft replies, re-read on every remote change rather than on the
@@ -609,17 +663,24 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
                     </p>
                     <p className="text-muted-foreground">
                       {openMentions[0]!.status === "claimed"
-                        ? "Claude has picked this up and will reply in the thread."
+                        ? "Claude is on it and posts each step in the thread below as it goes."
                         : "Claude answers in this thread — next time it reads the board, or straight away if the mention watcher is running."}
                     </p>
                   </div>
                 </div>
               ) : null}
 
-              <div className="max-h-52 space-y-2 overflow-y-auto pr-1 scrollbar-slim">
+              <div
+                ref={threadRef}
+                onScroll={(event) => {
+                  const thread = event.currentTarget;
+                  threadPinnedRef.current = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 40;
+                }}
+                className="max-h-72 space-y-2 overflow-y-auto pr-1 scrollbar-slim"
+              >
                 {comments.length === 0 ? (
                   <p className="py-2 text-xs text-muted-foreground">
-                    No comments yet. Claude posts progress here on tasks assigned to it — and write{" "}
+                    No comments yet. Claude posts each step of its work here — and write{" "}
                     <span className="font-medium text-primary">@claude</span> to ask it for something on this card.
                   </p>
                 ) : (
@@ -627,17 +688,37 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
                     const author = users.find((user) => user.id === comment.authorId);
                     const isAgent = author?.kind === "agent";
                     const ask = mentionByComment.get(comment.id);
+                    const kind = comment.kind === "note" ? null : COMMENT_KIND[comment.kind];
+                    const KindIcon = kind?.icon;
+                    // A comment that asked for something is left-ruled in its
+                    // request's colour, so the thread shows at a glance which
+                    // notes were asks and which were just notes. A result rules
+                    // itself the same way; a blocker takes the whole card,
+                    // because it is the one comment asking the user to act.
+                    const rule = ask
+                      ? { borderLeftWidth: 2, borderLeftColor: MENTION_TINT[ask.status] }
+                      : comment.kind === "blocker" && kind
+                        ? {
+                            borderLeftWidth: 2,
+                            borderLeftColor: kind.tint,
+                            borderColor: `color-mix(in oklab, ${kind.tint} 40%, transparent)`,
+                            backgroundColor: `color-mix(in oklab, ${kind.tint} 8%, transparent)`,
+                          }
+                        : comment.kind === "result" && kind
+                          ? { borderLeftWidth: 2, borderLeftColor: kind.tint }
+                          : undefined;
                     return (
                       <div
                         key={comment.id}
                         className={cn(
                           "rounded-md border p-2.5 text-[13px] leading-relaxed",
                           isAgent ? "border-primary/25 bg-primary/8" : "border-border/70 bg-surface/60",
+                          // A step in a long run is the background noise of the
+                          // thread; the blocker and the result are the two the
+                          // user came to read, so only those keep full weight.
+                          comment.kind === "progress" && "border-border/60 bg-surface/50",
                         )}
-                        // A comment that asked for something is left-ruled in its
-                        // request's colour, so the thread shows at a glance which
-                        // notes were asks and which were just notes.
-                        style={ask ? { borderLeftWidth: 2, borderLeftColor: MENTION_TINT[ask.status] } : undefined}
+                        style={rule}
                       >
                         <div className="mb-1 flex items-center gap-2">
                           <Avatar
@@ -646,6 +727,20 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
                             size="sm"
                           />
                           <span className="text-xs font-medium">{author?.displayName ?? comment.authorId}</span>
+                          {kind && KindIcon ? (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-[9.5px] font-medium uppercase tracking-wide ring-1 ring-inset"
+                              style={{
+                                color: kind.tint,
+                                backgroundColor: `color-mix(in oklab, ${kind.tint} 12%, transparent)`,
+                                // @ts-expect-error CSS custom property for the ring color
+                                "--tw-ring-color": `color-mix(in oklab, ${kind.tint} 30%, transparent)`,
+                              }}
+                            >
+                              <KindIcon className="size-2.5" />
+                              {kind.label}
+                            </span>
+                          ) : null}
                           {ask ? (
                             <Hint
                               label={
@@ -673,7 +768,15 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
                             {relativeTime(comment.createdAt)}
                           </span>
                         </div>
-                        <MentionText text={comment.body} handles={handles} className="text-card-foreground" />
+                        {/* Claude writes markdown; the human writes into a plain
+                            box with no formatting affordance, so reinterpreting
+                            their asterisks would be a change they did not ask
+                            for. Both paths highlight mentions identically. */}
+                        {isAgent ? (
+                          <Markdown text={comment.body} handles={handles} className="text-card-foreground" />
+                        ) : (
+                          <MentionText text={comment.body} handles={handles} className="text-card-foreground" />
+                        )}
                       </div>
                     );
                   })

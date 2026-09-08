@@ -5,6 +5,7 @@ import {
   buildBoardExport,
   addComment,
   AppError,
+  badRequest,
   COLUMN_KINDS,
   createBoard,
   createLogger,
@@ -38,6 +39,7 @@ import {
   listIntakeMessages,
   listMentions,
   listProjects,
+  projectUsage,
   listResponses,
   listResponseTurns,
   listSyncRuns,
@@ -64,6 +66,7 @@ import {
   updateTask,
   USER_CLAUDE,
   type ActorContext,
+  type CommentKind,
 } from "@automation/core";
 import {
   renderActivity,
@@ -72,6 +75,7 @@ import {
   renderColumns,
   renderMention,
   renderMentions,
+  renderProjectUsage,
   renderProjects,
   renderIntakeMessage,
   renderIntakeQueue,
@@ -163,14 +167,10 @@ export function registerTools(server: McpServer): void {
       title: "List projects",
       description:
         "List the directories on this machine that work can be carried out inside, with their paths. A board can name one as its default and a card can override it; a card's project is what decides where an @claude request on it is actually run. Call this when you need a slug to pass to board_update or task_update.",
-      inputSchema: {
-        includeArchived: z.boolean().optional().describe("Include archived projects. Default false."),
-      },
+      inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    handler("project_list", (args: { includeArchived?: boolean }) =>
-      renderProjects(listProjects({ includeArchived: args.includeArchived })),
-    ),
+    handler("project_list", () => renderProjects(listProjects())),
   );
 
   server.registerTool(
@@ -201,13 +201,12 @@ export function registerTools(server: McpServer): void {
     {
       title: "Update a project",
       description:
-        "Rename a project, point it at a different directory, re-describe it, or archive it. A new path is checked the same way project_add checks one. Archiving hides it from the pickers without orphaning the cards already pointing at it.",
+        "Rename a project, point it at a different directory, or re-describe it. A new path is checked the same way project_add checks one — so re-pointing a project at a moved checkout is the fix for a directory that no longer exists, and it moves every board and card that pointed at it. There is no archived state: the only way to remove a project is project_delete, which takes its boards and cards with it.",
       inputSchema: {
         projectId: projectRef,
         name: z.string().optional().describe("Renaming also re-derives the slug."),
         path: z.string().optional(),
         description: z.string().nullable().optional(),
-        archived: z.boolean().optional(),
       },
     },
     handler("project_update", ({ projectId, ...patch }: { projectId: string } & Record<string, unknown>, ctx) => {
@@ -219,19 +218,43 @@ export function registerTools(server: McpServer): void {
   server.registerTool(
     "project_delete",
     {
-      title: "Unregister a project",
+      title: "Delete a project and its work",
       description:
-        "Remove a project from the board app. Nothing on disk is touched and no card is deleted: every board and card pointing at it is detached, and the counts come back so you can say what changed. Prefer project_update archived=true unless removal was asked for.",
-      inputSchema: { projectId: projectRef },
+        "Delete a project **and every board and card that pointed at it** — the boards with their columns, cards and comments, plus any card on another board that named this project itself. Nothing on disk is touched; only the board app's rows go. A project has no archived state, so this is the only way to remove one, and it is not reversible: call project_usage_check first (or read the conflict this returns) and get the user's word before passing confirmCascade. Deleting frees the directory to be registered again.",
+      inputSchema: {
+        projectId: projectRef,
+        confirmCascade: z
+          .boolean()
+          .optional()
+          .describe(
+            "Required when anything points at the project. Without it the call comes back as a conflict listing the boards and cards that would be deleted — show that to the user and ask before retrying with true.",
+          ),
+      },
       annotations: { destructiveHint: true },
     },
-    handler("project_delete", (args: { projectId: string }, ctx) => {
+    handler("project_delete", (args: { projectId: string; confirmCascade?: boolean }, ctx) => {
       const project = requireProject(args.projectId);
-      const result = deleteProject(project.id, ctx);
+      const result = deleteProject(project.id, ctx, { confirmCascade: args.confirmCascade });
       return (
-        `Unregistered "${project.name}" (${project.path}). The directory itself is untouched.\n` +
-        `Detached ${result.detachedBoards} board(s) and ${result.detachedTasks} card(s), which now have no project.`
+        `Deleted "${project.name}" (${project.path}). The directory itself is untouched.\n` +
+        `Removed ${result.deletedBoards} board(s) and ${result.deletedTasks} card(s) with it.\n` +
+        `That path can be registered again with project_add.`
       );
+    }),
+  );
+
+  server.registerTool(
+    "project_usage_check",
+    {
+      title: "What deleting a project would remove",
+      description:
+        "The boards and cards that would be deleted along with a project. Read this before project_delete so the user is told what they are losing in their own board's names, rather than a count after the fact.",
+      inputSchema: { projectId: projectRef },
+      annotations: { readOnlyHint: true },
+    },
+    handler("project_usage_check", (args: { projectId: string }) => {
+      const project = requireProject(args.projectId);
+      return renderProjectUsage(project, projectUsage(project.id));
     }),
   );
 
@@ -662,14 +685,33 @@ export function registerTools(server: McpServer): void {
     {
       title: "Comment on a task",
       description:
-        "Append a comment as Claude. This is the channel for reporting progress, findings, questions or hand-offs on work assigned to you — the human sees it on the card in the web UI. Note that when the *human* writes @claude in a comment it becomes a tracked request you are expected to act on (see the mentions tool); your own comments never create one.",
+        "Append a comment as Claude. This is the channel for reporting progress, findings, questions or hand-offs on work assigned to you — the human sees it on the card in the web UI, and on a request you are carrying out unattended it is the ONLY thing they see until you finish. Use it as you work, not just at the end: say what you are about to do, then what it turned out to be. Set `kind` so the thread stays readable — a blocker rendered as one more paragraph of narration is a blocker they will miss. The body is rendered as markdown, so headings, lists, **bold** and fenced code blocks all display properly. Note that when the *human* writes @claude in a comment it becomes a tracked request you are expected to act on (see the mentions tool); your own comments never create one.",
       inputSchema: {
         taskId: z.string(),
-        body: z.string().describe("Comment text, up to 4000 characters."),
+        body: z.string().describe("Comment text, up to 4000 characters. Rendered as markdown."),
+        kind: z
+          .enum(["note", "progress", "blocker", "result"])
+          .optional()
+          .describe(
+            "What this comment is. progress: a step in work under way — what you are doing or have just done. " +
+              "blocker: you cannot go on and need the human (say exactly what would unblock you; also task_move the " +
+              "card to a blocked state with a blockedReason if the work itself is stuck). note: an ordinary remark, " +
+              "the default. Do not pass result — mention_resolve writes that one when it closes the request out.",
+          ),
       },
     },
-    handler("task_comment", (args: { taskId: string; body: string }, ctx) => {
-      addComment(args.taskId, args.body, ctx);
+    handler("task_comment", (args: { taskId: string; body: string; kind?: CommentKind }, ctx) => {
+      const kind = args.kind ?? "note";
+      if (kind === "result") {
+        throw badRequest("kind=result is written by mention_resolve, not by hand — use progress, blocker or note", {
+          taskId: args.taskId,
+        });
+      }
+      addComment(args.taskId, args.body, ctx, kind);
+      // A narrating run calls this several times per job, and echoing the whole
+      // card back each time buries the work it is actually doing. The full render
+      // is for the orienting case (a plain note); a step gets an acknowledgement.
+      if (kind !== "note") return `Posted ${kind} on ${args.taskId}. The human can see it now — carry on.`;
       return `Comment added to ${args.taskId}.\n\n${renderTaskDetail(getTaskDetail(args.taskId))}`;
     }),
   );
@@ -717,7 +759,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Take a request",
       description:
-        "Claim one open request so a second run of you does not duplicate the work, and get everything needed to carry it out: the ask, the full card and its comment thread. If the card names a project, the reply carries that directory — that is the codebase the request is about, and the watcher spawns runs for these requests inside it. Claiming an already-claimed or already-resolved request fails rather than stealing it. Claim before acting, resolve when done.",
+        "Claim one open request so a second run of you does not duplicate the work, and get everything needed to carry it out: the ask, the full card and its comment thread. If the card names a project, the reply carries that directory — that is the codebase the request is about, and the watcher spawns runs for these requests inside it. Claiming an already-claimed or already-resolved request fails rather than stealing it. Claim before acting, report as you go with task_comment, and resolve when done.",
       inputSchema: {
         mentionId: z.string().describe("Request id from the mentions tool, e.g. men_a1b2c3d4."),
       },
@@ -733,7 +775,30 @@ export function registerTools(server: McpServer): void {
         "",
         renderTaskDetail(getTaskDetail(mention.taskId)),
         "",
-        `Do what was asked, then call mention_resolve for ${mention.id}. If you cannot, resolve it as dismissed and say why — leaving it claimed reads to the human as ignored.`,
+        "--- how to report on this ---",
+        "",
+        // The reporting contract lives here rather than only in the watcher's
+        // prompt for the same reason sync_claim carries its rules: this is the
+        // moment the model acts, and a rule it read in a spawn prompt half an
+        // hour of work ago is a rule it is relying on memory for.
+        "The person who asked is not in a session with you. This card's thread is the only place they",
+        "can see what is happening, and until you write in it a run that is working and a run that died",
+        "look identical to them. So narrate it:",
+        "",
+        `  - Start by posting your plan: task_comment ${mention.taskId} kind=progress with what you understood`,
+        "    the ask to be and the steps you are about to take. One short paragraph or a list, not an essay.",
+        "  - Post again as you finish each meaningful step — what you did, and what you found. Name real",
+        "    things: files, ids, numbers. \"Working on it\" tells them nothing they did not already know.",
+        `  - The moment you cannot go on, post kind=blocker saying exactly what would unblock you, and do it`,
+        "    then rather than at the end. If the work itself is stuck, also task_move the card to a blocked",
+        "    state with a blockedReason so the board agrees with the thread.",
+        "  - Bodies render as markdown in the UI, so use lists, `code` and **bold** where they help.",
+        "",
+        "Judgement, not ceremony: a one-step request needs one comment and its resolution, not five. The",
+        "test is whether somebody reading only this thread could say what happened.",
+        "",
+        `Then call mention_resolve for ${mention.id}. If you cannot finish, resolve it as dismissed and say`,
+        "why — leaving it claimed reads to the human as ignored.",
       ].join("\n");
     }),
   );
@@ -743,7 +808,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Close out a request",
       description:
-        "Close a request you have finished. `resolution` is the one-line record of what you actually did. By default that same text is posted into the task's comment thread as your reply, because a request answered with silence in the thread is indistinguishable from one that was ignored — pass an explicit `reply` for a longer answer, or reply=null to resolve without commenting. Use status=dismissed when the right outcome was to not act, and say why.",
+        "Close a request you have finished. `resolution` is the one-line record of what you actually did. By default that same text is posted into the task's comment thread as your reply, because a request answered with silence in the thread is indistinguishable from one that was ignored — pass an explicit `reply` for a longer answer (it renders as markdown, so a list of what changed reads well), or reply=null to resolve without commenting. This is the last word on the request, not the running commentary: report the steps with task_comment kind=progress as you go, and let this one say where it ended up. Use status=dismissed when the right outcome was to not act, or when you were blocked, and say what would unblock it.",
       inputSchema: {
         mentionId: z.string(),
         resolution: z

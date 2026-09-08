@@ -341,7 +341,10 @@ export function resolveMention(
   const reply = input.reply === null ? null : (input.reply ?? resolution).trim() || null;
 
   write((db) => {
-    if (reply) insertComment(db, { taskId: mention.taskId, boardId: mention.boardId }, reply, actor);
+    // `result`, whichever way it went: this is the outcome of a tracked request,
+    // and the answered/dismissed distinction is already carried by the mention's
+    // own status chip beside it rather than needing a second kind to say it.
+    if (reply) insertComment(db, { taskId: mention.taskId, boardId: mention.boardId }, reply, actor, "result");
     db.run("UPDATE task_mentions SET status = ?, resolved_at = ?, resolution = ? WHERE id = ?", [
       status,
       new Date().toISOString(),
