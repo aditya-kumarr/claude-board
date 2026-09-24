@@ -12,6 +12,7 @@ import {
   Plus,
   SlidersHorizontal,
   Sparkles,
+  Terminal,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -51,6 +52,7 @@ export function BoardHeader({
   onOpenIntake,
   onOpenWhatsApp,
   onSetProject,
+  onConnectClaude,
   syncing,
 }: {
   detail: BoardDetail;
@@ -69,6 +71,8 @@ export function BoardHeader({
   onOpenWhatsApp: () => void;
   /** Opens the picker for the directory this board's work happens in. */
   onSetProject: () => void;
+  /** Shows how to give a Claude Code session in another project this board. */
+  onConnectClaude: () => void;
   /** True while the queue request itself is in flight. */
   syncing: boolean;
 }) {
@@ -172,6 +176,9 @@ export function BoardHeader({
               <DropdownMenuLabel>{board.id}</DropdownMenuLabel>
               <DropdownMenuItem onSelect={onSetProject}>
                 <FolderGit2 /> {detail.project ? "Change project" : "Set a project"}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={onConnectClaude}>
+                <Terminal /> Connect Claude Code…
               </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => onExport("xlsx")}>
                 <FileSpreadsheet /> Export to Excel

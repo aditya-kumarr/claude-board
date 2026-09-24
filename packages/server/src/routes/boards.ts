@@ -18,6 +18,7 @@ import {
   toCsv,
   updateBoard,
   updateColumn,
+  boardMcpConfig,
 } from "@automation/core";
 import { route } from "../middleware/errors.ts";
 import { boardToXlsx } from "../lib/xlsx.ts";
@@ -34,6 +35,18 @@ export const boardsRouter: Router = Router();
 boardsRouter.use("/:boardId/intake", intakeRouter);
 /** WhatsApp exports, nested the same way — its upload reads a raw zip body. */
 boardsRouter.use("/:boardId/whatsapp", whatsappRouter);
+
+/**
+ * What to run in a project so its Claude Code sessions can reach this board, and
+ * only this board. Read-only: the UI shows it to be copied, because registering an
+ * MCP server in somebody's project is theirs to do, not this process's.
+ */
+boardsRouter.get(
+  "/:boardId/mcp",
+  route((req, res) => {
+    res.json(boardMcpConfig(param(req, "boardId"), { serverName: typeof req.query.name === "string" ? req.query.name : undefined }));
+  }),
+);
 
 boardsRouter.get(
   "/",

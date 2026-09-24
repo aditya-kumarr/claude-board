@@ -14,6 +14,7 @@
     "dev:server": "turbo run dev --filter=@automation/server",
     "dev:web": "turbo run dev --filter=@automation/web",
     "mcp": "bun run --cwd packages/mcp start",
+    "mcp:connect": "bun scripts/mcp-connect.ts",
     "build": "turbo run build",
     "serve": "turbo run build && bun run --cwd packages/server start",
     "tunnel": "bun scripts/tunnel.ts",

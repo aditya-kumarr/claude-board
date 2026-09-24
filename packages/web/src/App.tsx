@@ -11,6 +11,7 @@ import { BoardColumnView } from "@/components/board-column";
 import { TaskDialog } from "@/components/task-dialog";
 import { IntakePanel } from "@/components/intake-panel";
 import { WhatsAppPanel } from "@/components/whatsapp-panel";
+import { ConnectClaudeDialog } from "@/components/connect-claude-dialog";
 import { CreateBoardDialog } from "@/components/create-board-dialog";
 import { CreateTaskDialog } from "@/components/create-task-dialog";
 import { ProjectsDialog } from "@/components/projects-dialog";
@@ -46,6 +47,7 @@ export default function App() {
   const [boardProjectOpen, setBoardProjectOpen] = useState(false);
   const [intakeOpen, setIntakeOpen] = useState(false);
   const [whatsappOpen, setWhatsappOpen] = useState(false);
+  const [connectOpen, setConnectOpen] = useState(false);
   const [editingColumn, setEditingColumn] = useState<BoardColumn | null>(null);
 
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
@@ -365,6 +367,7 @@ export default function App() {
                 onOpenIntake={() => setIntakeOpen(true)}
                 onOpenWhatsApp={() => setWhatsappOpen(true)}
                 onSetProject={() => setBoardProjectOpen(true)}
+                onConnectClaude={() => setConnectOpen(true)}
                 syncing={syncing}
               />
 
@@ -454,6 +457,8 @@ export default function App() {
         }}
         onError={fail}
       />
+
+      <ConnectClaudeDialog board={activeBoard} open={connectOpen} onOpenChange={setConnectOpen} />
 
       <WhatsAppPanel
         board={activeBoard}

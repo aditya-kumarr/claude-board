@@ -75,6 +75,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 const body = (data: unknown) => ({ body: JSON.stringify(data) });
 
+/** How a project's Claude Code sessions reach one board. Mirrors core's `BoardMcpConfig`. */
+export interface BoardMcpConfig {
+  boardId: string;
+  boardName: string;
+  serverName: string;
+  projectPath: string | null;
+  command: string;
+  mcpJson: { mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> };
+}
+
 export interface CreateBoardPayload {
   name: string;
   durationKind: DurationKind;
@@ -266,6 +276,7 @@ export const api = {
       { method: "POST", body: file, headers: { "content-type": file.type || "application/zip" } },
     );
   },
+  boardMcp: (boardId: string) => request<BoardMcpConfig>(`/boards/${boardId}/mcp`),
   taskPhotos: (taskId: string) => request<{ photos: TaskPhoto[] }>(`/tasks/${taskId}/photos`),
   /** Direct URL, for an `<img>` — not fetched through `request`. */
   whatsappMediaUrl: (mediaId: string) => `/api/whatsapp/media/${mediaId}/content`,

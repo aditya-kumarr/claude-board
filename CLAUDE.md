@@ -28,6 +28,8 @@ bun run watch:whatsapp  # spawn `claude -p` for each uploaded WhatsApp chat expo
 bun run db:reset        # drop data/board.db and re-migrate
 bun run db:seed         # sample board; no-ops if it already exists
 bun run mcp             # MCP server on stdio (Claude normally spawns this)
+bun run mcp:connect <board>   # print how to give ONE board to a Claude Code session in another
+                              # project; --add runs `claude mcp add` in the board's project dir
 ```
 
 There is no test runner configured. Verify changes by running the stack and exercising the
@@ -294,6 +296,20 @@ returns them as tool content with `isError: true` so the model can read what wen
 retry rather than seeing an opaque protocol failure. Anything else becomes a logged 500.
 
 ### MCP specifics
+
+**One board can be handed to a session in another project.** `AUTOMATION_BOARD` (or `--board`) set
+on the stdio server confines it to that board; `services/connect.ts` builds the `claude mcp add`
+command and `.mcp.json` entry for it (`bun run mcp:connect`, `GET /api/boards/:id/mcp`, and the
+board's ⋯ → *Connect Claude Code*). The scope is enforced in two places in `packages/mcp`, both in
+`scope.ts`: tools that cannot be confined to one board (`board_create`/`board_delete`, every
+`project_*` tool — registering a project grants unattended runs write access to a directory) are
+not registered at all, and `applyScope` in the `handler()` wrapper fills a missing `boardId`,
+refuses a different one, and looks up every entity id an argument names (`taskId`, `mentionId`,
+`importId` … the map is `ENTITY_BOARD`) and refuses one from another board. A new tool that takes
+an entity id needs its key in that map, or the scope silently does not cover it. `boardId` is only
+filled for tools whose schema declares it, because several handlers spread leftover args into a
+core update. The config pins `AUTOMATION_DB_PATH` absolutely: the server runs from the project's
+cwd, and Bun loads *that* directory's `.env`.
 
 Tools are registered in `packages/mcp/src/tools.ts` with zod input schemas. Tool responses are
 **human-readable text**, not JSON — `format.ts` renders boards, queues and task detail in a

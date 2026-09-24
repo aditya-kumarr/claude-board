@@ -12,6 +12,7 @@ export * from "./services/boards.ts";
 export * from "./services/columns.ts";
 export * from "./services/export.ts";
 export * from "./services/comments.ts";
+export * from "./services/connect.ts";
 export * from "./services/intake.ts";
 export * from "./services/mentions.ts";
 export * from "./services/projects.ts";

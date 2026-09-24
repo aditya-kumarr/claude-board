@@ -98,6 +98,7 @@ import {
   renderWhatsAppImport,
   renderWhatsAppQueue,
 } from "./format.ts";
+import { applyScope, currentScope, SCOPED_OUT } from "./scope.ts";
 
 const log = createLogger("mcp");
 
@@ -109,6 +110,9 @@ type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: bo
 const ok = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 
 let callCounter = 0;
+
+/** Tools whose schema declares `boardId`, recorded at registration — see `applyScope`. */
+const BOARD_ARG_TOOLS = new Set<string>();
 
 /**
  * Wraps a tool handler with logging and error translation. A domain error comes
@@ -122,7 +126,8 @@ function handler<A>(name: string, fn: (args: A, ctx: ActorContext) => string) {
     const scoped = log.child({ tool: name, requestId });
     scoped.info("tool called", { args: args as Record<string, unknown> });
     try {
-      const text = fn(args, actor(requestId));
+      // Inside the try so a scope refusal reaches the model as a readable error.
+      const text = fn(applyScope(args, BOARD_ARG_TOOLS.has(name)), actor(requestId));
       scoped.info("tool ok", { ms: Math.round(performance.now() - startedAt) });
       return ok(text);
     } catch (error) {
@@ -167,7 +172,18 @@ const projectRef = z
     'A registered directory: project id, slug ("nexus_web"), name, or the absolute path itself. project_list has them.',
   );
 
-export function registerTools(server: McpServer): void {
+export function registerTools(mcp: McpServer): void {
+  /**
+   * `registerTool`, minus the tools a board-scoped server must not have, and
+   * noting which tools take a `boardId` so the scope can fill it in.
+   */
+  const server = {
+    registerTool: ((name: string, config: { inputSchema?: Record<string, unknown> }, callback: unknown) => {
+      if (currentScope() && SCOPED_OUT.has(name)) return undefined;
+      if (config.inputSchema && "boardId" in config.inputSchema) BOARD_ARG_TOOLS.add(name);
+      return (mcp.registerTool as (...args: unknown[]) => unknown)(name, config, callback);
+    }) as McpServer["registerTool"],
+  };
   /* ---------------------------------------------------------------- projects */
 
   server.registerTool(
@@ -281,7 +297,12 @@ export function registerTools(server: McpServer): void {
       annotations: { readOnlyHint: true },
     },
     handler("board_list", (args: { includeArchived?: boolean }) => {
-      const boards = listBoards({ includeArchived: args.includeArchived });
+      const scope = currentScope();
+      // A scoped server lists its own board and nothing else, so the habitual
+      // first call cannot become a tour of every client on the machine.
+      const boards = listBoards({ includeArchived: args.includeArchived || Boolean(scope) }).filter(
+        (detail) => !scope || detail.board.id === scope.boardId,
+      );
       if (boards.length === 0) return "No boards yet. Use board_create to make one.";
       return `${boards.length} board(s):\n\n${boards.map(renderBoardSummary).join("\n\n")}`;
     }),
