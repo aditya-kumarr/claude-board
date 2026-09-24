@@ -10,6 +10,7 @@ import { SyncSettings, type SyncOptions } from "@/components/sync-settings";
 import { BoardColumnView } from "@/components/board-column";
 import { TaskDialog } from "@/components/task-dialog";
 import { IntakePanel } from "@/components/intake-panel";
+import { WhatsAppPanel } from "@/components/whatsapp-panel";
 import { CreateBoardDialog } from "@/components/create-board-dialog";
 import { CreateTaskDialog } from "@/components/create-task-dialog";
 import { ProjectsDialog } from "@/components/projects-dialog";
@@ -44,6 +45,7 @@ export default function App() {
   const [projectsDialogOpen, setProjectsDialogOpen] = useState(false);
   const [boardProjectOpen, setBoardProjectOpen] = useState(false);
   const [intakeOpen, setIntakeOpen] = useState(false);
+  const [whatsappOpen, setWhatsappOpen] = useState(false);
   const [editingColumn, setEditingColumn] = useState<BoardColumn | null>(null);
 
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
@@ -54,6 +56,7 @@ export default function App() {
     // A chat belongs to one board; leaving it open across a switch would show the
     // previous board's conversation over the new board's cards.
     setIntakeOpen(false);
+    setWhatsappOpen(false);
   }, [view]);
 
   // Fall back to a sensible view when the selected board disappears. Checked
@@ -360,6 +363,7 @@ export default function App() {
                 onOpenSyncSettings={() => setSyncSettingsOpen(true)}
                 onExport={exportBoard}
                 onOpenIntake={() => setIntakeOpen(true)}
+                onOpenWhatsApp={() => setWhatsappOpen(true)}
                 onSetProject={() => setBoardProjectOpen(true)}
                 syncing={syncing}
               />
@@ -448,6 +452,16 @@ export default function App() {
           // context for reading it, and closing it would lose the thread.
           setOpenTaskId(taskId);
         }}
+        onError={fail}
+      />
+
+      <WhatsAppPanel
+        board={activeBoard}
+        open={whatsappOpen}
+        onOpenChange={setWhatsappOpen}
+        revisionKey={remoteChangeAt}
+        onChanged={() => void refresh()}
+        onOpenTask={setOpenTaskId}
         onError={fail}
       />
 

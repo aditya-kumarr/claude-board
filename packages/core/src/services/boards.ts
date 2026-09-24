@@ -12,6 +12,7 @@ import { record } from "./activity.ts";
 import type { ActorContext } from "./context.ts";
 import { listMentions } from "./mentions.ts";
 import { getIntakeSummary } from "./intake.ts";
+import { getWhatsAppSummary } from "./whatsapp.ts";
 import { findProject, requireProject } from "./projects.ts";
 import { countBoardResponses } from "./responses.ts";
 import { getSyncSummary } from "./sync.ts";
@@ -233,6 +234,7 @@ export function getBoardDetail(boardId: string): BoardDetail {
     sync: getSyncSummary(boardId),
     responses: countBoardResponses(boardId),
     intake: getIntakeSummary(boardId),
+    whatsapp: getWhatsAppSummary(boardId),
   };
 }
 

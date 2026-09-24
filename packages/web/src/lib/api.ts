@@ -28,6 +28,10 @@ import type {
   TaskDetail,
   TaskWithContext,
   User,
+  BoardWhatsAppSummary,
+  WhatsAppChat,
+  WhatsAppImport,
+  TaskPhoto,
 } from "./types";
 
 /** Error carrying the server's machine-readable code so callers can branch on it. */
@@ -237,6 +241,41 @@ export const api = {
     request<{ id: string }>(`/intake/messages/${messageId}`, { method: "DELETE" }),
   /** Direct URL, for an `<img>` or a link — not fetched through `request`. */
   attachmentUrl: (attachmentId: string) => `/api/intake/attachments/${attachmentId}/content`,
+
+  /* ---- WhatsApp exports ----
+   * The upload sends the zip itself as the body rather than base64 inside JSON: an
+   * export with media is often tens of megabytes. Settings ride in the query string.
+   * Like the intake chat it only queues — the cards arrive on the revision poll.
+   */
+  whatsapp: (boardId: string) =>
+    request<{ chats: WhatsAppChat[]; imports: WhatsAppImport[]; summary: BoardWhatsAppSummary }>(
+      `/boards/${boardId}/whatsapp`,
+    ),
+  uploadWhatsApp: (
+    boardId: string,
+    file: File,
+    options: { instruction?: string; readPhotos?: boolean; chat?: string; selfName?: string; since?: string },
+  ) => {
+    const query = new URLSearchParams({ filename: file.name });
+    for (const [key, value] of Object.entries(options)) {
+      if (value === undefined || value === "" || value === false) continue;
+      query.set(key, String(value));
+    }
+    return request<{ import: WhatsAppImport; chat: WhatsAppChat; notes: string[] }>(
+      `/boards/${boardId}/whatsapp?${query}`,
+      { method: "POST", body: file, headers: { "content-type": file.type || "application/zip" } },
+    );
+  },
+  taskPhotos: (taskId: string) => request<{ photos: TaskPhoto[] }>(`/tasks/${taskId}/photos`),
+  /** Direct URL, for an `<img>` — not fetched through `request`. */
+  whatsappMediaUrl: (mediaId: string) => `/api/whatsapp/media/${mediaId}/content`,
+  cancelWhatsAppImport: (importId: string) =>
+    request<WhatsAppImport>(`/whatsapp/imports/${importId}/cancel`, { method: "POST", ...body({}) }),
+  deleteWhatsAppImport: (importId: string) =>
+    request<{ id: string }>(`/whatsapp/imports/${importId}`, { method: "DELETE" }),
+  /** Forgets the chat on this board — its watermark, imports and kept photos. Cards stay. */
+  deleteWhatsAppChat: (boardId: string, chatId: string) =>
+    request<{ id: string }>(`/boards/${boardId}/whatsapp/chats/${chatId}`, { method: "DELETE" }),
 
   /* ---- draft replies ----
    * A card imported from a mail is half a card without the message the user owes

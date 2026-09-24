@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 bun install
 bun run dev             # API :4000 + UI :5173 together
-bun run dev:all         # the above plus all four watchers, one supervisor, one Ctrl-C
-bun run dev:watchers    # just the four watchers together
+bun run dev:all         # the above plus all five watchers, one supervisor, one Ctrl-C
+bun run dev:watchers    # just the five watchers together
 bun run dev:server      # Express API only (bun --watch)
 bun run dev:web         # Vite only; proxies /api to :4000
 bun run typecheck       # tsc --noEmit over core, server, mcp, web
@@ -22,6 +22,8 @@ bun run watch:sync      # spawn `claude -p` for each queued Outlook/Teams sync
 bun run watch:responses # spawn `claude -p` for each queued change to a draft reply
                         # --once / --dry-run
 bun run watch:intake    # spawn `claude -p` for each thing pasted into a board's chat
+                        # --once / --dry-run
+bun run watch:whatsapp  # spawn `claude -p` for each uploaded WhatsApp chat export
                         # --once / --dry-run
 bun run db:reset        # drop data/board.db and re-migrate
 bun run db:seed         # sample board; no-ops if it already exists
@@ -189,6 +191,29 @@ go through `write()` or the UI will not notice it.
   costs the user a whole round trip to discover. `completeIntakeMessage` verifies the task ids it is
   given against the board: the chat renders them as links, and a reply naming cards that are not
   there reads as work having been done when it was not.
+- **A WhatsApp chat is synced by re-uploading its export, and the watermark is per (board, chat).**
+  There is no API, so the source is the phone's "Export chat" zip, which is the whole history every
+  time. `whatsapp_chats.synced_through` is what makes a re-upload incremental, and it follows the sync
+  rules exactly: the window is cut and frozen at upload, and only `completeWhatsAppImport(done)` moves
+  the watermark, so a failed or cancelled import is re-offered next upload. Android exports have
+  minute resolution, so "after the watermark" alone would drop a message sent in the same minute as the
+  last one read — `boundary_keys` holds the fingerprints *at* the watermark, and a fingerprint counts
+  repeats so "ok" twice in a minute stays two messages. A first import is capped to
+  `WHATSAPP_FIRST_IMPORT_DAYS` with the gap recorded in `capped_from`, and one import carries at most
+  `WHATSAPP_MAX_MESSAGES`, naming how many `remaining`. One open import per chat, so two runs never
+  read one window. Messages are joined to their files **at upload**: every mentioned file gets a
+  `whatsapp_media` row so the run still knows "sent a video here", but only photos are written to disk,
+  and a run may open them only when that upload set `read_photos` — the watcher adds `Read` on exactly
+  that flag. Cards carry `sourceRef = whatsapp:<chatKey>:<fingerprint>`, which is what keeps a
+  `since` re-read (which ignores the watermark and never drags it backwards) from duplicating cards.
+- **A card's photos are its source message's photo plus whatever was linked.** `sourceRef` names one
+  message, but a bug in a chat is often a screenshot and then "same here" with a second one, so photos
+  cannot be derived from it alone. `listTaskPhotos` merges the photo on the card's own source message
+  (found through the fingerprint, which is what makes cards made before linking existed show anything)
+  with `task_media` rows written by `whatsapp_link_photos`, in chat order. Linking takes only kept
+  photos from an import on the card's *own* board — anything else would move a screenshot between
+  boards. The task dialog fetches `GET /api/tasks/:id/photos` on the revision poll, because a link does
+  not touch the task row, and shows one image or a carousel.
 - **A project is a directory, and a card's project is where its work happens.** `projects`
   holds absolute paths on this machine, validated at registration (`services/projects.ts`) rather
   than at delegation time — a typo comes back into the dialog the user is looking at instead of
@@ -310,6 +335,11 @@ the contents of every text attachment, the on-disk path of anything needing `Rea
 states and deadline, **and the cards already on the board** — because the commonest way to get this
 wrong is to re-import work that is already there.
 
+`whatsapp_pending` / `whatsapp_claim` / `whatsapp_complete` / `whatsapp_cancel` / `whatsapp_chats` are
+the WhatsApp tools, with a fourth `my_queue` banner. `whatsapp_claim` prints every message in the window
+with its author, minute, file and `ref`, says which name is the user's (`self_name`, given at upload),
+and gives a photo's path only when the upload asked for photos to be read.
+
 ### Board intake
 
 ### Draft replies
@@ -340,8 +370,8 @@ model gets those rules at the moment it acts, rather than depending on the promp
 
 ### The watchers
 
-`scripts/watch-mentions.ts`, `scripts/watch-sync.ts`, `scripts/watch-responses.ts` and
-`scripts/watch-intake.ts` are the push half: they poll their queue and spawn a real `claude -p` run per item. All four live in `scripts/`,
+`scripts/watch-mentions.ts`, `scripts/watch-sync.ts`, `scripts/watch-responses.ts`,
+`scripts/watch-intake.ts` and `scripts/watch-whatsapp.ts` are the push half: they poll their queue and spawn a real `claude -p` run per item. All four live in `scripts/`,
 outside the bun workspace, so they import core by **relative path**
 (`../packages/core/src/index.ts`) and are not covered by `bun run typecheck` — same as
 `scripts/tunnel.ts`.
@@ -414,7 +444,11 @@ released for another attempt and then failed with the run's last output as the n
 lands under the user's instruction. Like the sync watcher it works the queue that exists at startup,
 for the same reason.
 
-`scripts/watch-intake.ts` is the only one whose allowlist is not a constant. `toolsFor(message)`
+`scripts/watch-whatsapp.ts` computes its allowlist the same way: `mcp__board` for an ordinary upload,
+`Read` added only when the upload ticked "read the photos" and has one Read can open (HEIC cannot).
+`WHATSAPP_WATCH_ALLOW_PHOTO_READS=false` withholds it entirely.
+
+`scripts/watch-intake.ts` is the only other one whose allowlist is not a constant. `toolsFor(message)`
 returns `mcp__board` when everything pasted was inlined at upload, and adds `Read` only for a message
 carrying a screenshot or a PDF — least privilege per paste rather than one allowlist wide enough for
 the worst case. `INTAKE_WATCH_ALLOW_FILE_READS=false` withholds it entirely, in which case a run

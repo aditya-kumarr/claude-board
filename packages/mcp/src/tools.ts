@@ -65,6 +65,12 @@ import {
   updateProject,
   updateTask,
   USER_CLAUDE,
+  cancelWhatsAppImport,
+  claimWhatsAppImport,
+  completeWhatsAppImport,
+  listWhatsAppChats,
+  listWhatsAppImports,
+  linkTaskPhotos,
   type ActorContext,
   type CommentKind,
 } from "@automation/core";
@@ -88,6 +94,9 @@ import {
   renderSyncState,
   renderTaskDetail,
   renderTaskList,
+  renderWhatsAppChats,
+  renderWhatsAppImport,
+  renderWhatsAppQueue,
 } from "./format.ts";
 
 const log = createLogger("mcp");
@@ -616,16 +625,24 @@ export function registerTools(server: McpServer): void {
             `Take one with intake_claim, make the cards, then intake_complete.\n\n`
           : "";
 
-      const waiting = pending.length + replyTurns.length + pastes.length;
+      // An uploaded chat export is the same bargain as a paste.
+      const chatImports = listWhatsAppImports({ boardId: args.boardId, status: "pending", limit: 10 });
+      const whatsappBanner =
+        chatImports.length > 0
+          ? `${renderWhatsAppQueue(chatImports, "WHATSAPP EXPORTS WAITING TO BECOME CARDS")}\n\n` +
+            `Take one with whatsapp_claim, make the cards, then whatsapp_complete.\n\n`
+          : "";
+
+      const waiting = pending.length + replyTurns.length + pastes.length + chatImports.length;
       if (tasks.length === 0) {
-        return `${banner}${replyBanner}${intakeBanner}${body}\n\n${
+        return `${banner}${replyBanner}${intakeBanner}${whatsappBanner}${body}\n\n${
           waiting > 0
             ? "No tasks are assigned to you, but the requests above are still waiting."
             : "Nothing is assigned to you right now."
         }`;
       }
       return (
-        `${banner}${replyBanner}${intakeBanner}${body}\n\n` +
+        `${banner}${replyBanner}${intakeBanner}${whatsappBanner}${body}\n\n` +
         `Next step: task_get for detail, then task_move to "doing" when you start and "done" (or "needs review") when finished.`
       );
     }),
@@ -1586,6 +1603,172 @@ export function registerTools(server: McpServer): void {
     handler("intake_cancel", (args: { messageId: string; reason: string }, ctx) => {
       const message = cancelIntakeMessage(args.messageId, args.reason, ctx);
       return `Intake message ${message.id} cancelled. Nothing was created.`;
+    }),
+  );
+
+/* ---------------------------------------------------------------- whatsapp */
+
+  server.registerTool(
+    "whatsapp_pending",
+    {
+      title: "WhatsApp exports waiting to become cards",
+      description:
+        "The user uploads a WhatsApp chat export (the phone's own Export chat zip) to a board, and the board app parses it but cannot decide what in it is work — that is your job. Each board keeps its own watermark per chat, so an upload only holds the messages this board has not read yet. Check here alongside intake_pending when catching up.",
+      inputSchema: {
+        boardId: z.string().optional().describe("Restrict to one board."),
+        includeFinished: z.boolean().optional().describe("Also list imports already handled. Default false."),
+        limit: z.number().int().min(1).max(200).optional().describe("Default 20."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    handler("whatsapp_pending", (args: { boardId?: string; includeFinished?: boolean; limit?: number }) => {
+      const imports = listWhatsAppImports({
+        boardId: args.boardId,
+        status: args.includeFinished ? undefined : ["pending", "claimed"],
+        limit: args.limit ?? 20,
+      });
+      const body = renderWhatsAppQueue(imports, args.includeFinished ? "WhatsApp imports" : "Uploaded, waiting to be read");
+      if (imports.length === 0) return `${body}\n\nNothing waiting.`;
+      return `${body}\n\nNext step: whatsapp_claim <importId> — it returns every message in the window plus the board's states.`;
+    }),
+  );
+
+  server.registerTool(
+    "whatsapp_chats",
+    {
+      title: "WhatsApp chats on a board and how far each is read",
+      description:
+        "Lists the WhatsApp chats imported into a board, with each one's watermark (the newest message a successful import covered) and the outcome of its last import. Read-only.",
+      inputSchema: { boardId: z.string() },
+      annotations: { readOnlyHint: true },
+    },
+    handler("whatsapp_chats", (args: { boardId: string }) => renderWhatsAppChats(listWhatsAppChats(args.boardId), args.boardId)),
+  );
+
+  server.registerTool(
+    "whatsapp_claim",
+    {
+      title: "Take an uploaded WhatsApp export and read it",
+      description:
+        "Claim one uploaded chat export so a second run of you does not make the same cards twice, and get everything needed to act: every message in the window, oldest first, each with its author, time, the file it carried and the ref to use in sourceRef; which name is the user's; the board's states and deadline; and the cards already on it. Photos come with a path to open with Read ONLY when the upload asked for photos to be read — otherwise do not try to. Finish with whatsapp_complete.",
+      inputSchema: { importId: z.string().describe("Import id from whatsapp_pending, e.g. wai_a1b2c3d4.") },
+    },
+    handler("whatsapp_claim", (args: { importId: string }, ctx) => {
+      const entry = claimWhatsAppImport(args.importId, ctx);
+      const board = getBoardDetail(entry.boardId);
+      const existing = listTasks({ boardId: entry.boardId, includeDone: true, limit: 500 });
+
+      return [
+        `Claimed ${entry.id}.`,
+        "",
+        renderWhatsAppImport(entry),
+        "",
+        entry.readablePaths.length > 0
+          ? `PHOTOS TO OPEN (${entry.readablePaths.length}) — the user asked for them to be read. Use Read on each path\n` +
+            "  above. A photo of a defect, a document or a whiteboard is often where the real detail is. If Read\n" +
+            "  is not available to you, say so in whatsapp_complete rather than guessing at what it showed."
+          : "Do NOT try to open any file: photos were not asked to be read on this upload, and other media never\n" +
+            "  is. A message that is only a photo still tells you something was sent — use the caption and the\n" +
+            "  messages around it, and say in your reply if a card depends on a photo you did not see.",
+        "",
+        "WHAT COUNTS AS A CARD:",
+        "  Follow what they typed first. Without an instruction: a card is something the USER is being asked",
+        "  to do, has promised to do, or is waiting on somebody else for — a request, a commitment, a deadline,",
+        "  a problem reported to them. Chatter, greetings, thanks, reactions, system lines and things already",
+        "  resolved later in the same window are not cards. One piece of work discussed over twenty messages",
+        "  is ONE card; put the thread's gist and the key messages (with their times) in the description.",
+        "",
+        "  sourceRef MUST be whatsapp:<chatKey>:<ref of the message that raised the work> — e.g.",
+        `  whatsapp:${entry.chatKey}:${entry.messages[0]?.fingerprint ?? "<ref>"}. That is what stops a later upload`,
+        "  of the same chat making the card again; a conflict from task_create means the card already exists.",
+        "",
+        "  Map, do not dump: a date someone gave is dueAt, and it must fall inside the board window (ends",
+        `  ${entry.boardEndsAt}) — leave it off and say so if it falls outside. Assign "me" for work the user owes;`,
+        '  "claude" only for work you can genuinely do yourself. Urgency in the chat maps onto priority.',
+        "  Do NOT invent work that is not in the messages. You are unattended: make the cards you are sure of",
+        "  and name what was ambiguous in your reply.",
+        "",
+        "PHOTOS ON CARDS: a card shows the photo on its own source message automatically. Any OTHER photo",
+        "  that belongs to it — the \"same here\" screenshot that followed, a second angle of one defect, a",
+        "  photo you folded into this card from another message — link with whatsapp_link_photos taskId",
+        "  mediaIds=[wam_…] (the ids in [brackets] above). A photo on a message you made no card for stays off",
+        "  every card. You can link these without opening them; the caption and the order say what they are.",
+        "",
+        "STATES ON THIS BOARD (new cards belong in the leftmost/backlog one unless the chat says otherwise):",
+        renderColumns(board.columns),
+        "",
+        existing.length > 0
+          ? `ALREADY ON THIS BOARD (${existing.length}) — check against these before creating:\n${renderTaskList(existing, "existing cards")}`
+          : "This board has no cards yet, so nothing can be a duplicate.",
+        "",
+        `FINALLY: whatsapp_complete ${entry.id} with the ids you created and a reply to the user — what you made,`,
+        "what you skipped and why. Completing it done is what moves this chat's watermark past these messages, so",
+        "complete it even when nothing here was work. Use status=failed only when you could not read the chat at",
+        "all: the watermark then stays put and the same messages are offered again next upload.",
+      ].join("\n");
+    }),
+  );
+
+  server.registerTool(
+    "whatsapp_link_photos",
+    {
+      title: "Put WhatsApp photos on a card",
+      description:
+        "Attach photos from a WhatsApp import to a card, so they show in the card's detail view as a carousel. A card made from a chat already shows the photo on its own source message; use this for the others that belong to it — a follow-up \"same here\" screenshot, several photos of one problem. Only photos (not videos or documents), and only from a chat imported into the card's own board. Linking one twice is harmless; replace=true swaps the whole set.",
+      inputSchema: {
+        taskId: z.string(),
+        mediaIds: z.array(z.string()).describe("Photo ids (wam_…) as whatsapp_claim prints them in [brackets]."),
+        replace: z.boolean().optional().describe("Replace the card's linked photos instead of adding. Default false."),
+      },
+    },
+    handler("whatsapp_link_photos", (args: { taskId: string; mediaIds: string[]; replace?: boolean }, ctx) => {
+      const photos = linkTaskPhotos(args.taskId, args.mediaIds, ctx, { replace: args.replace });
+      return `Card ${args.taskId} now shows ${photos.length} photo(s): ${photos.map((photo) => photo.filename).join(", ")}`;
+    }),
+  );
+
+  server.registerTool(
+    "whatsapp_complete",
+    {
+      title: "Finish a WhatsApp import",
+      description:
+        "Finish a claimed import. With status=done (the default) the chat's watermark on this board moves to the end of the window, so the next upload starts after these messages — this is the only thing that moves it. `createdTasks` are checked against the board. `note` is your reply shown under the upload: what you made, what you skipped and why. status=failed leaves the watermark where it was so the window is read again.",
+      inputSchema: {
+        importId: z.string(),
+        note: z.string().describe("Your reply, written to the user."),
+        createdTasks: z
+          .array(z.string())
+          .optional()
+          .describe("Ids of the cards you created for this import, exactly as task_create returned them."),
+        status: z.enum(["done", "failed"]).optional().describe("Default done."),
+      },
+    },
+    handler(
+      "whatsapp_complete",
+      (args: { importId: string; note: string; createdTasks?: string[]; status?: "done" | "failed" }, ctx) => {
+        const { importId, ...input } = args;
+        const entry = completeWhatsAppImport(importId, input, ctx);
+        return (
+          `Import ${entry.id} marked ${entry.status}` +
+          `${entry.status === "done" ? `; "${entry.chatName}" is now read through ${entry.through}` : "; the watermark did not move"}.\n\n` +
+          renderBoard(getBoardDetail(entry.boardId))
+        );
+      },
+    ),
+  );
+
+  server.registerTool(
+    "whatsapp_cancel",
+    {
+      title: "Abandon a WhatsApp import",
+      description:
+        "Drop a queued or claimed import without creating anything — for an upload that is no longer wanted, or one left claimed by a dead process. The watermark does not move. Prefer whatsapp_complete with status=failed when you read it and could not use it, so the reason reaches the user.",
+      inputSchema: { importId: z.string(), reason: z.string().describe("Why it is being abandoned.") },
+      annotations: { destructiveHint: true },
+    },
+    handler("whatsapp_cancel", (args: { importId: string; reason: string }, ctx) => {
+      const entry = cancelWhatsAppImport(args.importId, args.reason, ctx);
+      return `WhatsApp import ${entry.id} cancelled. Nothing was created and the watermark did not move.`;
     }),
   );
 

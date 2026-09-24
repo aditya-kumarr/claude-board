@@ -9,6 +9,7 @@ import { boardsRouter } from "./routes/boards.ts";
 import { tasksRouter } from "./routes/tasks.ts";
 import { responsesRouter } from "./routes/responses.ts";
 import { intakeMessagesRouter } from "./routes/intake.ts";
+import { whatsappItemsRouter } from "./routes/whatsapp.ts";
 import { metaRouter } from "./routes/meta.ts";
 import { projectsRouter } from "./routes/projects.ts";
 
@@ -33,6 +34,7 @@ export function createApp(): express.Express {
   app.use("/api/tasks", tasksRouter);
   app.use("/api/responses", responsesRouter);
   app.use("/api/intake", intakeMessagesRouter);
+  app.use("/api/whatsapp", whatsappItemsRouter);
 
   // Serve the built SPA when it exists, so `bun run build` gives a single-port app.
   const webDist = join(REPO_ROOT, "packages/web/dist");

@@ -130,6 +130,22 @@ export const OPEN_INTAKE_STATUSES: readonly IntakeStatus[] = ["pending", "claime
 export const INTAKE_ATTACHMENT_KINDS = ["text", "image", "pdf"] as const;
 export type IntakeAttachmentKind = (typeof INTAKE_ATTACHMENT_KINDS)[number];
 
+/**
+ * Lifecycle of one uploaded WhatsApp export. The intake bargain again: the API
+ * process parses the zip and records the window, and an agent run makes the cards.
+ */
+export const WHATSAPP_IMPORT_STATUSES = ["pending", "claimed", "done", "failed", "cancelled"] as const;
+export type WhatsAppImportStatus = (typeof WHATSAPP_IMPORT_STATUSES)[number];
+
+export const OPEN_WHATSAPP_IMPORT_STATUSES: readonly WhatsAppImportStatus[] = ["pending", "claimed"];
+
+/** What a message's file is. Only `photo` is ever written to disk or opened. */
+export const WHATSAPP_MEDIA_KINDS = ["photo", "video", "audio", "sticker", "document", "other"] as const;
+export type WhatsAppMediaKind = (typeof WHATSAPP_MEDIA_KINDS)[number];
+
+/** In the zip, named but not in it, or left out by a "Without media" export. */
+export type WhatsAppMediaState = "attached" | "missing" | "omitted";
+
 /** Seeded, stable ids so both the UI and the agent can reference assignees. */
 export const USER_ME = "me";
 export const USER_CLAUDE = "claude";
@@ -627,6 +643,119 @@ export interface IntakeMessageWithContext extends IntakeMessageWithFiles {
   readablePaths: Array<{ id: string; filename: string; kind: IntakeAttachmentKind; absolutePath: string }>;
 }
 
+/** A chat as one board knows it, with how far that board has read it. */
+export interface WhatsAppChat {
+  id: string;
+  boardId: string;
+  chatKey: string;
+  name: string;
+  selfName: string | null;
+  /** Newest message a successful import covered. Null until one has. */
+  syncedThrough: string | null;
+  lastImportAt: string | null;
+  lastStatus: "ok" | "failed" | null;
+  lastDetail: string | null;
+  /** Cards made from this chat, across every import. */
+  imported: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One file a message in an import refers to. */
+export interface WhatsAppMedia {
+  id: string;
+  importId: string;
+  filename: string;
+  kind: WhatsAppMediaKind;
+  bytes: number;
+  /** Relative to `WHATSAPP_DIR`; null when only the reference was kept. */
+  path: string | null;
+  /** Stored, and a format Read can open. */
+  readable: boolean;
+}
+
+export interface WhatsAppMessage {
+  seq: number;
+  sentAt: string;
+  author: string | null;
+  body: string;
+  mediaName: string | null;
+  mediaState: WhatsAppMediaState | null;
+  mediaId: string | null;
+  fingerprint: string;
+}
+
+export interface WhatsAppImport {
+  id: string;
+  boardId: string;
+  chatId: string;
+  filename: string;
+  instruction: string;
+  readPhotos: boolean;
+  status: WhatsAppImportStatus;
+  since: string | null;
+  windowStart: string;
+  through: string;
+  cappedFrom: string | null;
+  skippedOld: number;
+  messageCount: number;
+  mediaCount: number;
+  remaining: number;
+  requestedBy: string;
+  actorSource: ActorSource;
+  attempts: number;
+  note: string | null;
+  createdTasks: string[];
+  claimedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
+/** An import with its chat, for listing without a second read per row. */
+export interface WhatsAppImportWithChat extends WhatsAppImport {
+  chatName: string;
+  chatKey: string;
+}
+
+/** Everything a run needs to act: the window's messages, its media, the board. */
+export interface WhatsAppImportWithContext extends WhatsAppImportWithChat {
+  selfName: string | null;
+  boardName: string;
+  boardStartsAt: string;
+  boardEndsAt: string;
+  boardDescription: string | null;
+  messages: WhatsAppMessage[];
+  media: WhatsAppMedia[];
+  /**
+   * Photos the run may open, resolved to absolute paths. Empty unless the upload
+   * asked for photos to be read — which is what lets a watcher withhold Read.
+   */
+  readablePaths: Array<{ id: string; filename: string; absolutePath: string }>;
+}
+
+/**
+ * A photo shown on a card, with the message it arrived in — the caption and who
+ * sent it are usually what says what the screenshot is of.
+ */
+export interface TaskPhoto {
+  mediaId: string;
+  filename: string;
+  bytes: number;
+  sentAt: string | null;
+  author: string | null;
+  caption: string | null;
+  /** `linked` was attached to the card on purpose; `source` is the card's own message. */
+  via: "linked" | "source";
+}
+
+/** What the board header needs for its WhatsApp control. */
+export interface BoardWhatsAppSummary {
+  chats: number;
+  /** Imports queued or being worked on. */
+  open: number;
+  working: boolean;
+}
+
 /** What the board header needs to show its intake control. */
 export interface BoardIntakeSummary {
   /** Messages queued or being worked on. */
@@ -702,4 +831,6 @@ export interface BoardDetail {
   responses: BoardResponseCount[];
   /** Where this board's intake chat stands, for the header's control. */
   intake: BoardIntakeSummary;
+  /** WhatsApp chats feeding this board, and any upload in flight. */
+  whatsapp: BoardWhatsAppSummary;
 }

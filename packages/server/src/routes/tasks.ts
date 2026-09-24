@@ -6,6 +6,7 @@ import {
   listActivity,
   listComments,
   listMentions,
+  listTaskPhotos,
   listTasks,
   MENTION_STATUSES,
   moveTask,
@@ -22,6 +23,18 @@ export const tasksRouter: Router = Router();
  * as a task id, and nested so `:taskId` stays visible to the child router.
  */
 tasksRouter.use("/:taskId/responses", taskResponsesRouter);
+
+/**
+ * Photos from the WhatsApp chat a card came out of, for the detail view's
+ * carousel. Fetched on its own rather than read off the board, because linking a
+ * photo does not touch the task row — the dialog refetches on the revision poll.
+ */
+tasksRouter.get(
+  "/:taskId/photos",
+  route((req, res) => {
+    res.json({ photos: listTaskPhotos(param(req, "taskId")) });
+  }),
+);
 
 /** Cross-board task query — powers both the UI's "My work" view and the agent's queue. */
 tasksRouter.get(

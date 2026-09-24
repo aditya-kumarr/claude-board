@@ -22,6 +22,11 @@ import {
   type Task,
   type TaskComment,
   type TaskWithContext,
+  type TaskPhoto,
+  type WhatsAppChat,
+  type WhatsAppImportWithChat,
+  type WhatsAppImportWithContext,
+  type WhatsAppMedia,
 } from "@automation/core";
 
 const PRIORITY_MARK: Record<string, string> = { urgent: "!!", high: "! ", medium: "  ", low: "· " };
@@ -171,6 +176,7 @@ export function renderBoard(detail: BoardDetail, options: { includeDone?: boolea
     syncLine(detail.sync),
     responsesLine(detail.responses),
     intakeLine(detail.intake),
+    whatsappLine(detail.whatsapp),
     "",
   ].filter((line): line is string => line !== null);
 
@@ -344,8 +350,10 @@ export function renderTaskDetail(input: {
   project?: ResolvedProject | null;
   openMentions?: MentionWithContext[];
   responses?: TaskResponseSummary;
+  photos?: TaskPhoto[];
 }): string {
   const { task, board, column, overdue } = input;
+  const photos = input.photos ?? [];
   const open = input.openMentions ?? [];
   return [
     `${task.title}  (${task.id})`,
@@ -365,6 +373,15 @@ export function renderTaskDetail(input: {
       : null,
     "",
     task.description ? `description:\n${task.description}` : "description: (none)",
+    photos.length > 0
+      ? `\nphotos from the chat (${photos.length}):\n${photos
+          .map(
+            (photo) =>
+              `  - ${photo.mediaId}  ${photo.filename}${photo.author ? `  from ${photo.author}` : ""}` +
+              `${photo.caption ? `: ${photo.caption}` : ""}${photo.via === "source" ? "  (on the card's own message)" : ""}`,
+          )
+          .join("\n")}`
+      : null,
     "",
     // Before the comments: on a card that came out of an inbox, the reply the
     // user owes is the point of the card, not a footnote to it.
@@ -636,6 +653,121 @@ export function renderIntakeQueue(messages: IntakeMessageWithFiles[], heading: s
 function intakeLine(intake: BoardDetail["intake"]): string | null {
   if (intake.open > 0) {
     return `intake chat: ${intake.open} pasted message(s) waiting to be turned into cards — call intake_pending`;
+  }
+  return null;
+}
+
+/* ----------------------------------------------------------------- whatsapp */
+
+/** Date and minute, because a chat's order is the point and shortDate drops the time. */
+function stamp(iso: string): string {
+  const d = new Date(iso);
+  return `${WEEKDAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]} ${String(d.getHours()).padStart(2, "0")}:${String(
+    d.getMinutes(),
+  ).padStart(2, "0")}`;
+}
+
+/** What became of a message's file, said in the terms a run can act on. */
+function mediaNote(
+  name: string,
+  state: string | null,
+  media: WhatsAppMedia | undefined,
+  readable: Map<string, string>,
+  readPhotos: boolean,
+): string {
+  if (state === "omitted") return "(media left out of the export)";
+  if (state === "missing" || !media) return `${name} (named, but not in the zip)`;
+  const path = readable.get(media.id);
+  // The id is what whatsapp_link_photos takes, so it is printed for every photo
+  // that can go on a card — whether or not the run may look at it.
+  const id = media.kind === "photo" && media.path ? ` [${media.id}]` : "";
+  if (path) return `photo${id} ${media.filename} ${humanBytes(media.bytes)}  open with Read: ${path}`;
+  if (media.kind === "photo") {
+    if (!readPhotos) return `photo${id} ${media.filename} (not opened: reading photos was not asked for on this upload)`;
+    return `photo${id} ${media.filename} (cannot be opened: ${media.path ? "not a format Read handles" : "too large to keep"})`;
+  }
+  return `${media.kind} ${media.filename} ${humanBytes(media.bytes)} (not opened: only photos are ever read)`;
+}
+
+/**
+ * One import as the job spec: the whole window of messages, each joined to its
+ * file and carrying the ref a card made from it should use.
+ */
+export function renderWhatsAppImport(entry: WhatsAppImportWithContext): string {
+  const media = new Map(entry.media.map((file) => [file.id, file]));
+  const readable = new Map(entry.readablePaths.map((file) => [file.id, file.absolutePath]));
+  const authors = [...new Set(entry.messages.map((message) => message.author).filter((author): author is string => !!author))];
+
+  const lines = [
+    `${entry.id}  [${entry.status}]  chat "${entry.chatName}" (${entry.chatKey})  uploaded ${shortDate(entry.createdAt)} as ${entry.filename}`,
+    `  board: "${entry.boardName}" (${entry.boardId})  window ${shortDate(entry.boardStartsAt)} to ${shortDate(entry.boardEndsAt)}`,
+    entry.boardDescription ? `  board note: ${entry.boardDescription}` : null,
+    entry.attempts > 1 ? `  attempt ${entry.attempts} — an earlier run did not finish` : null,
+    `  messages: ${entry.messageCount} from ${stamp(entry.windowStart)} to ${stamp(entry.through)}` +
+      (entry.since ? `, everything after the last sync (${stamp(entry.since)})` : ", first read of this chat on this board"),
+    entry.cappedFrom
+      ? `  NOT READ: ${entry.skippedOld} older message(s) back to ${shortDate(entry.cappedFrom)} were left out of this window on purpose`
+      : null,
+    entry.remaining > 0 ? `  ${entry.remaining} newer message(s) are past this import's cap and will come in the next one` : null,
+    `  people: ${authors.join(", ") || "(none)"}`,
+    entry.selfName
+      ? `  the user is "${entry.selfName}" in this chat — their own messages are what they said, not what was asked of them`
+      : "  the user's own name in this chat was not given — infer it carefully, and say so if it matters",
+    "",
+    entry.instruction
+      ? `WHAT THEY ASKED FOR:\n  ${entry.instruction}`
+      : "WHAT THEY ASKED FOR:\n  (nothing typed — make cards for the work this chat asks of them)",
+    "",
+    "MESSAGES (oldest first; ref = the sourceRef suffix for a card made from that message):",
+  ].filter((line): line is string => line !== null);
+
+  for (const message of entry.messages) {
+    const body = message.body ? message.body.replace(/\n/g, "\n      ") : "";
+    lines.push(`#${message.seq}  ${stamp(message.sentAt)}  ${message.author ?? "(system)"}: ${body}  [ref ${message.fingerprint}]`);
+    if (message.mediaName || message.mediaState) {
+      lines.push(
+        `      ↳ ${mediaNote(message.mediaName ?? "", message.mediaState, message.mediaId ? media.get(message.mediaId) : undefined, readable, entry.readPhotos)}`,
+      );
+    }
+  }
+
+  if (entry.note) lines.push("", `outcome: ${entry.note}`);
+  if (entry.createdTasks.length > 0) lines.push(`created: ${entry.createdTasks.join(", ")}`);
+  return lines.join("\n");
+}
+
+export function renderWhatsAppQueue(imports: WhatsAppImportWithChat[], heading: string): string {
+  if (imports.length === 0) return `${heading}\n  (nothing uploaded)`;
+  const lines = [`${heading}  --  ${imports.length} import(s), oldest first`, ""];
+  for (const entry of imports) {
+    lines.push(
+      `${entry.id}  [${entry.status}]  "${entry.chatName}"  ${entry.messageCount} message(s), ${entry.mediaCount} file(s)` +
+        `${entry.readPhotos ? ", photos to read" : ""}  board=${entry.boardId}`,
+      `  asked: ${entry.instruction || "(nothing typed)"}`,
+    );
+    if (entry.note) lines.push(`  outcome: ${entry.note}`);
+    lines.push("");
+  }
+  return lines.join("\n").trimEnd();
+}
+
+export function renderWhatsAppChats(chats: WhatsAppChat[], boardId: string): string {
+  if (chats.length === 0) return `No WhatsApp chats have been imported into ${boardId} yet.`;
+  return [
+    `WhatsApp chats on ${boardId} -- each has its own watermark on this board`,
+    "",
+    ...chats.map(
+      (chat) =>
+        `${chat.id}  "${chat.name}" (${chat.chatKey})  read through ${chat.syncedThrough ? stamp(chat.syncedThrough) : "— (never completed)"}` +
+        `  cards=${chat.imported}${chat.lastStatus ? `  last=${chat.lastStatus}` : ""}${chat.selfName ? `  user="${chat.selfName}"` : ""}` +
+        (chat.lastStatus === "failed" && chat.lastDetail ? `\n  last failure: ${chat.lastDetail}` : ""),
+    ),
+  ].join("\n");
+}
+
+function whatsappLine(summary: BoardDetail["whatsapp"]): string | null {
+  if (summary.open > 0) {
+    return `whatsapp: ${summary.open} uploaded chat export(s) waiting to be turned into cards — call whatsapp_pending`;
   }
   return null;
 }

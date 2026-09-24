@@ -7,6 +7,7 @@ import {
   FileSpreadsheet,
   FolderGit2,
   Loader2,
+  MessageCircle,
   MoreHorizontal,
   Plus,
   SlidersHorizontal,
@@ -48,6 +49,7 @@ export function BoardHeader({
   onOpenSyncSettings,
   onExport,
   onOpenIntake,
+  onOpenWhatsApp,
   onSetProject,
   syncing,
 }: {
@@ -63,6 +65,8 @@ export function BoardHeader({
   onExport: (format: "csv" | "xlsx") => void;
   /** Opens the intake chat — paste raw material, get cards. */
   onOpenIntake: () => void;
+  /** Opens the board's WhatsApp chats — upload an export, get cards for what is new. */
+  onOpenWhatsApp: () => void;
   /** Opens the picker for the directory this board's work happens in. */
   onSetProject: () => void;
   /** True while the queue request itself is in flight. */
@@ -108,6 +112,23 @@ export function BoardHeader({
               {detail.intake.open > 0 ? (
                 <span className="rounded-full bg-primary/15 px-1.5 text-[10px] font-semibold text-primary">
                   {detail.intake.open}
+                </span>
+              ) : null}
+            </Button>
+          </Hint>
+          <Hint label="Upload a WhatsApp chat export and get cards for what is new in it">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onOpenWhatsApp}
+              disabled={board.archived}
+              className={cn(detail.whatsapp.open > 0 && "border-primary/45 text-primary")}
+            >
+              {detail.whatsapp.working ? <Loader2 className="animate-spin" /> : <MessageCircle />}
+              WhatsApp
+              {detail.whatsapp.open > 0 ? (
+                <span className="rounded-full bg-primary/15 px-1.5 text-[10px] font-semibold text-primary">
+                  {detail.whatsapp.open}
                 </span>
               ) : null}
             </Button>

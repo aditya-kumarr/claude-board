@@ -10,6 +10,7 @@
     "AUTOMATION_DB_PATH",
     "AUTOMATION_LOG_DIR",
     "AUTOMATION_INTAKE_DIR",
+    "AUTOMATION_WHATSAPP_DIR",
     "TUNNEL_HOSTNAME",
     "WATCH_CLAUDE_CONFIG_DIR",
     "TUNNEL_NAME",
@@ -17,6 +18,7 @@
     "SYNC_*",
     "RESPONSE_WATCH_*",
     "INTAKE_WATCH_*",
+    "WHATSAPP_*",
     "ANTHROPIC_*",
     "CLAUDE_*"
   ],
@@ -37,6 +39,7 @@
     "//#watch:mentions": { "cache": false, "persistent": true },
     "//#watch:sync": { "cache": false, "persistent": true },
     "//#watch:responses": { "cache": false, "persistent": true },
-    "//#watch:intake": { "cache": false, "persistent": true }
+    "//#watch:intake": { "cache": false, "persistent": true },
+    "//#watch:whatsapp": { "cache": false, "persistent": true }
   }
 }

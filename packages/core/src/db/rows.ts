@@ -30,6 +30,13 @@ import type {
   IntakeAttachmentKind,
   IntakeMessage,
   IntakeStatus,
+  WhatsAppChat,
+  WhatsAppImport,
+  WhatsAppImportStatus,
+  WhatsAppMedia,
+  WhatsAppMediaKind,
+  WhatsAppMediaState,
+  WhatsAppMessage,
   Project,
   ProjectSource,
   ResolvedProject,
@@ -205,6 +212,69 @@ export interface IntakeAttachmentRow {
   path: string;
   text: string | null;
   created_at: string;
+}
+export interface WhatsAppChatRow {
+  id: string;
+  board_id: string;
+  chat_key: string;
+  name: string;
+  self_name: string | null;
+  synced_through: string | null;
+  boundary_keys: string | null;
+  last_import_at: string | null;
+  last_status: string | null;
+  last_detail: string | null;
+  imported: number;
+  created_at: string;
+  updated_at: string;
+}
+export interface WhatsAppImportRow {
+  id: string;
+  board_id: string;
+  chat_id: string;
+  filename: string;
+  instruction: string;
+  read_photos: number;
+  status: string;
+  since: string | null;
+  window_start: string;
+  through: string;
+  through_keys: string;
+  capped_from: string | null;
+  skipped_old: number;
+  message_count: number;
+  media_count: number;
+  remaining: number;
+  requested_by: string;
+  actor_source: string;
+  attempts: number;
+  note: string | null;
+  created_tasks: string | null;
+  claimed_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+}
+export interface WhatsAppMediaRow {
+  id: string;
+  import_id: string;
+  board_id: string;
+  filename: string;
+  kind: string;
+  bytes: number;
+  path: string | null;
+  readable: number;
+  created_at: string;
+}
+export interface WhatsAppMessageRow {
+  import_id: string;
+  seq: number;
+  sent_at: string;
+  author: string | null;
+  body: string;
+  media_name: string | null;
+  media_state: string | null;
+  media_id: string | null;
+  fingerprint: string;
 }
 export interface ActivityRow {
   id: number;
@@ -496,4 +566,66 @@ export const toIntakeAttachment = (row: IntakeAttachmentRow): IntakeAttachment =
   path: row.path,
   text: row.text,
   createdAt: row.created_at,
+});
+
+export const toWhatsAppChat = (row: WhatsAppChatRow): WhatsAppChat => ({
+  id: row.id,
+  boardId: row.board_id,
+  chatKey: row.chat_key,
+  name: row.name,
+  selfName: row.self_name,
+  syncedThrough: row.synced_through,
+  lastImportAt: row.last_import_at,
+  lastStatus: row.last_status as WhatsAppChat["lastStatus"],
+  lastDetail: row.last_detail,
+  imported: row.imported,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const toWhatsAppImport = (row: WhatsAppImportRow): WhatsAppImport => ({
+  id: row.id,
+  boardId: row.board_id,
+  chatId: row.chat_id,
+  filename: row.filename,
+  instruction: row.instruction,
+  readPhotos: row.read_photos === 1,
+  status: row.status as WhatsAppImportStatus,
+  since: row.since,
+  windowStart: row.window_start,
+  through: row.through,
+  cappedFrom: row.capped_from,
+  skippedOld: row.skipped_old,
+  messageCount: row.message_count,
+  mediaCount: row.media_count,
+  remaining: row.remaining,
+  requestedBy: row.requested_by,
+  actorSource: row.actor_source as ActorSource,
+  attempts: row.attempts,
+  note: row.note,
+  createdTasks: parseIds(row.created_tasks),
+  claimedAt: row.claimed_at,
+  finishedAt: row.finished_at,
+  createdAt: row.created_at,
+});
+
+export const toWhatsAppMedia = (row: WhatsAppMediaRow): WhatsAppMedia => ({
+  id: row.id,
+  importId: row.import_id,
+  filename: row.filename,
+  kind: row.kind as WhatsAppMediaKind,
+  bytes: row.bytes,
+  path: row.path,
+  readable: row.readable === 1,
+});
+
+export const toWhatsAppMessage = (row: WhatsAppMessageRow): WhatsAppMessage => ({
+  seq: row.seq,
+  sentAt: row.sent_at,
+  author: row.author,
+  body: row.body,
+  mediaName: row.media_name,
+  mediaState: row.media_state as WhatsAppMediaState | null,
+  mediaId: row.media_id,
+  fingerprint: row.fingerprint,
 });

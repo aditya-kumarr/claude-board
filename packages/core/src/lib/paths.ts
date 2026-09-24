@@ -23,6 +23,11 @@ export const LOG_DIR = fromEnv("AUTOMATION_LOG_DIR", "logs");
  * does not orphan them.
  */
 export const INTAKE_DIR = fromEnv("AUTOMATION_INTAKE_DIR", "data/intake");
+/**
+ * Photos kept from uploaded WhatsApp exports. Same rule as INTAKE_DIR: rows store
+ * paths relative to it. The zip itself is never kept.
+ */
+export const WHATSAPP_DIR = fromEnv("AUTOMATION_WHATSAPP_DIR", "data/whatsapp");
 
 export function ensureDir(path: string): string {
   mkdirSync(path, { recursive: true });

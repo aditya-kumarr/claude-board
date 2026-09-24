@@ -14,4 +14,6 @@ data/sync-watch.mcp.json
 data/response-watch.mcp.json
 data/intake-watch.mcp.json
 data/intake/
+data/whatsapp-watch.mcp.json
+data/whatsapp/
 .turbo/

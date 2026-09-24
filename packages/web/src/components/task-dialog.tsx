@@ -26,6 +26,7 @@ import { Markdown } from "@/components/markdown";
 import { agentHandles, hasAgentMention, MentionText } from "@/components/mention-text";
 import { ProjectSelect, shortPath } from "@/components/project-select";
 import { ResponseBoxes } from "@/components/response-boxes";
+import { PhotoCarousel } from "@/components/photo-carousel";
 import { ResponsePanel } from "@/components/response-panel";
 import { api, ApiError } from "@/lib/api";
 import { formatDateTime, relativeTime, toLocalInputValue, fromLocalInputValue } from "@/lib/format";
@@ -41,6 +42,7 @@ import {
   type Priority,
   type Project,
   type TaskComment,
+  type TaskPhoto,
   type TaskResponseSummary,
   type User,
 } from "@/lib/types";
@@ -117,6 +119,7 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
   const [responses, setResponses] = useState<TaskResponseSummary>({ responses: [], activeDraftTurn: null });
   const [openResponseId, setOpenResponseId] = useState<string | null>(null);
   const [draftingReplies, setDraftingReplies] = useState(false);
+  const [photos, setPhotos] = useState<TaskPhoto[]>([]);
 
   const handles = useMemo(() => agentHandles(users), [users]);
   /** Which comments asked Claude for something, and where each ask got to. */
@@ -169,6 +172,28 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
       cancelled = true;
     };
   }, [taskId, task?.updatedAt, board?.openMentions.length, revisionKey]);
+
+  /**
+   * Photos from the chat the card came out of. Keyed on the revision poll rather
+   * than the card, because linking a photo does not touch the task row. Only a
+   * card with a sourceRef can have any, so nothing else pays for the request.
+   */
+  useEffect(() => {
+    if (!taskId || !task?.sourceRef?.startsWith("whatsapp:")) {
+      setPhotos([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .taskPhotos(taskId)
+      .then(({ photos: list }) => !cancelled && setPhotos(list))
+      .catch(() => {
+        // Keep what is showing; the next poll retries.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId, task?.sourceRef, revisionKey]);
 
   /**
    * Keeps the newest comment in view as a run narrates, but only when the user is
@@ -590,6 +615,17 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
                 )}
               </section>
             )}
+
+            {/* Right under the description: on a bug reported in a chat, the
+                screenshot usually is the description. */}
+            {photos.length > 0 ? (
+              <section className="space-y-1.5">
+                <SectionLabel>
+                  {photos.length === 1 ? "Photo from the chat" : `Photos from the chat · ${photos.length}`}
+                </SectionLabel>
+                <PhotoCarousel photos={photos} />
+              </section>
+            ) : null}
 
             {column.kind === "blocked" || task.blockedReason ? (
               editing ? (

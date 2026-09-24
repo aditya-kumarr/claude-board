@@ -450,6 +450,146 @@ export const MIGRATIONS: Migration[] = [
         CHECK (kind IN ('note','progress','blocker','result'));
     `,
   },
+  {
+    version: 11,
+    name: "whatsapp_ingest",
+    sql: /* sql */ `
+      -- A WhatsApp chat as a board knows it. There is no API to read WhatsApp, so
+      -- the only source is the phone's "Export chat" zip, uploaded by hand, and
+      -- each upload is normally the WHOLE history again. The watermark is what
+      -- turns that into an incremental sync: a re-upload reads only what came
+      -- after it.
+      --
+      -- Keyed per board, not globally: the same group can feed two boards, and
+      -- each board has read it up to its own point.
+      CREATE TABLE whatsapp_chats (
+        id             TEXT PRIMARY KEY,
+        board_id       TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        -- slugified name, so "WhatsApp Chat - Ravi.zip" and "... Ravi (1).zip"
+        -- land on the same row.
+        chat_key       TEXT NOT NULL,
+        name           TEXT NOT NULL,
+        -- How the user appears in this export, so a run can tell what was asked
+        -- OF them from what they asked of others. NULL when not given.
+        self_name      TEXT,
+        -- sent_at of the newest message a successful import covered. Moved only
+        -- when a run completes ok, exactly like board_sync_state.synced_through.
+        synced_through TEXT,
+        -- JSON fingerprints of the messages AT synced_through. Android exports
+        -- have minute resolution, so "after the watermark" alone would drop a
+        -- message sent in the same minute as the last one read.
+        boundary_keys  TEXT,
+        last_import_at TEXT,
+        last_status    TEXT CHECK (last_status IN ('ok','failed')),
+        last_detail    TEXT,
+        imported       INTEGER NOT NULL DEFAULT 0,
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL,
+        UNIQUE (board_id, chat_key)
+      );
+
+      -- One upload: the queue and the transcript, as intake_messages is. The
+      -- window is decided at upload and frozen here, so the watermark the run
+      -- advances is the one the user saw when they pressed upload.
+      CREATE TABLE whatsapp_imports (
+        id            TEXT PRIMARY KEY,
+        board_id      TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        chat_id       TEXT NOT NULL REFERENCES whatsapp_chats(id) ON DELETE CASCADE,
+        filename      TEXT NOT NULL,
+        instruction   TEXT NOT NULL,
+        -- Photos are opened only when the user asked for it on this upload. The
+        -- watcher adds Read to the run's allowlist on exactly this flag.
+        read_photos   INTEGER NOT NULL DEFAULT 0,
+        status        TEXT NOT NULL CHECK (status IN ('pending','claimed','done','failed','cancelled')),
+        -- The watermark this window starts after; NULL for a first import or an
+        -- explicit start date.
+        since         TEXT,
+        window_start  TEXT NOT NULL,
+        -- Becomes whatsapp_chats.synced_through on success.
+        through       TEXT NOT NULL,
+        through_keys  TEXT NOT NULL,
+        -- A first import is capped to recent history; this is the oldest message
+        -- left out, so the gap is stated rather than silent.
+        capped_from   TEXT,
+        skipped_old   INTEGER NOT NULL DEFAULT 0,
+        message_count INTEGER NOT NULL,
+        media_count   INTEGER NOT NULL DEFAULT 0,
+        -- New messages past the per-import cap, left for the next upload.
+        remaining     INTEGER NOT NULL DEFAULT 0,
+        requested_by  TEXT NOT NULL REFERENCES users(id),
+        actor_source  TEXT NOT NULL CHECK (actor_source IN ('web','mcp','system')),
+        attempts      INTEGER NOT NULL DEFAULT 0,
+        note          TEXT,
+        created_tasks TEXT,
+        claimed_at    TEXT,
+        finished_at   TEXT,
+        created_at    TEXT NOT NULL
+      );
+
+      CREATE INDEX idx_wa_imports_board ON whatsapp_imports (board_id, created_at);
+      CREATE INDEX idx_wa_imports_queue ON whatsapp_imports (status, created_at);
+      CREATE INDEX idx_wa_imports_chat  ON whatsapp_imports (chat_id, created_at);
+
+      -- A file a message in the window refers to. Every one is recorded, so the
+      -- message still says "sent a video" — but only photos are written to disk,
+      -- because photos are the only media a run may ever be asked to look at.
+      CREATE TABLE whatsapp_media (
+        id         TEXT PRIMARY KEY,
+        import_id  TEXT NOT NULL REFERENCES whatsapp_imports(id) ON DELETE CASCADE,
+        board_id   TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        filename   TEXT NOT NULL,
+        kind       TEXT NOT NULL CHECK (kind IN ('photo','video','audio','sticker','document','other')),
+        bytes      INTEGER NOT NULL,
+        -- Relative to WHATSAPP_DIR. NULL when the bytes were not kept.
+        path       TEXT,
+        -- 1 when Read can open it: a stored jpg/png/webp/gif. A HEIC is a photo
+        -- it cannot, and saying so beats a run that reports a blank image.
+        readable   INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX idx_wa_media_import ON whatsapp_media (import_id);
+
+      -- The messages in the window, parsed at upload. Stored rather than re-read
+      -- from the zip because the zip is not kept, and the run needs them later.
+      CREATE TABLE whatsapp_messages (
+        import_id   TEXT NOT NULL REFERENCES whatsapp_imports(id) ON DELETE CASCADE,
+        seq         INTEGER NOT NULL,
+        sent_at     TEXT NOT NULL,
+        author      TEXT,
+        body        TEXT NOT NULL,
+        media_name  TEXT,
+        media_state TEXT CHECK (media_state IN ('attached','missing','omitted')),
+        media_id    TEXT REFERENCES whatsapp_media(id) ON DELETE SET NULL,
+        fingerprint TEXT NOT NULL,
+        PRIMARY KEY (import_id, seq)
+      );
+    `,
+  },
+  {
+    version: 12,
+    name: "task_media",
+    sql: /* sql */ `
+      -- Which photos belong to a card. A card's sourceRef names ONE message, but a
+      -- bug reported in a chat is often a screenshot followed by "same here" and a
+      -- second one, and one card can gather several messages — so the photos a
+      -- card owns cannot be derived from its sourceRef alone. The run that made
+      -- the card says which, here.
+      --
+      -- A card with no rows still shows the photo on its own source message; this
+      -- table is what adds the rest, and what makes the order deliberate.
+      CREATE TABLE task_media (
+        task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        -- Deleting the import deletes the photo, and the link with it.
+        media_id   TEXT NOT NULL REFERENCES whatsapp_media(id) ON DELETE CASCADE,
+        position   INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (task_id, media_id)
+      );
+
+      CREATE INDEX idx_task_media_media ON task_media (media_id);
+    `,
+  },
 ];
 
 /** Assignees exist before any board does, so both transports can reference them. */

@@ -29,6 +29,7 @@ import {
 import { getTaskResponseSummary } from "./responses.ts";
 import { positionAtIndex, positionForAppend } from "./positions.ts";
 import { requireUser } from "./users.ts";
+import { listTaskPhotos } from "./whatsapp.ts";
 
 const log = createLogger("tasks");
 
@@ -535,6 +536,8 @@ export function getTaskDetail(taskId: string) {
      * user has to send back is half of what the card is for.
      */
     responses: getTaskResponseSummary(taskId),
+    /** Screenshots from the chat the card came out of — often what the card is about. */
+    photos: listTaskPhotos(taskId),
     overdue: column.kind !== "done" && task.dueAt !== null && new Date(task.dueAt).getTime() < Date.now(),
   };
 }

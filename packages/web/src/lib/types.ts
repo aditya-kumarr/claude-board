@@ -395,6 +395,73 @@ export interface IntakeRejection {
   reason: string;
 }
 
+/* ---- WhatsApp exports ---- */
+
+export type WhatsAppImportStatus = "pending" | "claimed" | "done" | "failed" | "cancelled";
+export type WhatsAppMediaKind = "photo" | "video" | "audio" | "sticker" | "document" | "other";
+
+/** A chat as this board knows it, with how far this board has read it. */
+export interface WhatsAppChat {
+  id: string;
+  boardId: string;
+  chatKey: string;
+  name: string;
+  selfName: string | null;
+  syncedThrough: string | null;
+  lastImportAt: string | null;
+  lastStatus: "ok" | "failed" | null;
+  lastDetail: string | null;
+  imported: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WhatsAppImport {
+  id: string;
+  boardId: string;
+  chatId: string;
+  chatName: string;
+  chatKey: string;
+  filename: string;
+  instruction: string;
+  readPhotos: boolean;
+  status: WhatsAppImportStatus;
+  since: string | null;
+  windowStart: string;
+  through: string;
+  cappedFrom: string | null;
+  skippedOld: number;
+  messageCount: number;
+  mediaCount: number;
+  remaining: number;
+  requestedBy: string;
+  actorSource: "web" | "mcp" | "system";
+  attempts: number;
+  note: string | null;
+  createdTasks: string[];
+  claimedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
+/** A photo shown on a card, with the message it arrived in. */
+export interface TaskPhoto {
+  mediaId: string;
+  filename: string;
+  bytes: number;
+  sentAt: string | null;
+  author: string | null;
+  caption: string | null;
+  /** `linked` was attached on purpose; `source` is the card's own message. */
+  via: "linked" | "source";
+}
+
+export interface BoardWhatsAppSummary {
+  chats: number;
+  open: number;
+  working: boolean;
+}
+
 export interface ActivityEntry {
   id: number;
   boardId: string | null;
@@ -443,6 +510,7 @@ export interface BoardDetail {
   sync: BoardSyncSummary;
   responses: BoardResponseCount[];
   intake: BoardIntakeSummary;
+  whatsapp: BoardWhatsAppSummary;
 }
 
 export interface TaskDetail {
@@ -455,6 +523,7 @@ export interface TaskDetail {
   comments: TaskComment[];
   openMentions: MentionWithContext[];
   responses: TaskResponseSummary;
+  photos: TaskPhoto[];
   overdue: boolean;
 }
 

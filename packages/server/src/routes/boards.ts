@@ -23,6 +23,7 @@ import { route } from "../middleware/errors.ts";
 import { boardToXlsx } from "../lib/xlsx.ts";
 import { actorFrom, param } from "./helpers.ts";
 import { intakeRouter } from "./intake.ts";
+import { whatsappRouter } from "./whatsapp.ts";
 
 export const boardsRouter: Router = Router();
 
@@ -31,6 +32,8 @@ export const boardsRouter: Router = Router();
  * which needs its own body limit for base64 attachments.
  */
 boardsRouter.use("/:boardId/intake", intakeRouter);
+/** WhatsApp exports, nested the same way — its upload reads a raw zip body. */
+boardsRouter.use("/:boardId/whatsapp", whatsappRouter);
 
 boardsRouter.get(
   "/",
