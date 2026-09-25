@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { ProjectSelect } from "@/components/project-select";
 import { api, ApiError } from "@/lib/api";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, previewBoardEnd } from "@/lib/format";
 import { DURATION_LABELS, type DurationKind, type Project } from "@/lib/types";
 
 const KINDS: DurationKind[] = ["day", "week", "month", "quarter", "year", "custom"];
@@ -16,29 +16,8 @@ const DEFAULT_COLUMNS = ["To do", "Doing", "Blocked", "Needs review", "Done"];
 
 /** Local preview of the server's window maths, so the deadline is visible before saving. */
 function previewWindow(kind: DurationKind, endsAt: string): string {
-  const now = new Date();
-  const end = (() => {
-    switch (kind) {
-      case "day":
-        return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59);
-      case "week": {
-        const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7) + 6);
-        monday.setHours(23, 59);
-        return monday;
-      }
-      case "month":
-        return new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59);
-      case "quarter":
-        return new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3 + 3, 0, 23, 59);
-      case "year":
-        return new Date(now.getFullYear(), 11, 31, 23, 59);
-      case "custom":
-        return endsAt ? new Date(`${endsAt}T23:59`) : null;
-    }
-  })();
-  if (!end || Number.isNaN(end.getTime())) return "pick an end date";
-  return formatDateTime(end.toISOString());
+  const end = previewBoardEnd(kind, endsAt);
+  return end ? formatDateTime(end.toISOString()) : "pick an end date";
 }
 
 export function CreateBoardDialog({

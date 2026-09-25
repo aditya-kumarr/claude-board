@@ -12,6 +12,7 @@ import { TaskDialog } from "@/components/task-dialog";
 import { IntakePanel } from "@/components/intake-panel";
 import { WhatsAppPanel } from "@/components/whatsapp-panel";
 import { ConnectClaudeDialog } from "@/components/connect-claude-dialog";
+import { EditBoardDialog } from "@/components/edit-board-dialog";
 import { CreateBoardDialog } from "@/components/create-board-dialog";
 import { CreateTaskDialog } from "@/components/create-task-dialog";
 import { ProjectsDialog } from "@/components/projects-dialog";
@@ -48,6 +49,7 @@ export default function App() {
   const [intakeOpen, setIntakeOpen] = useState(false);
   const [whatsappOpen, setWhatsappOpen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
+  const [editBoardOpen, setEditBoardOpen] = useState(false);
   const [editingColumn, setEditingColumn] = useState<BoardColumn | null>(null);
 
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
@@ -368,6 +370,7 @@ export default function App() {
                 onOpenWhatsApp={() => setWhatsappOpen(true)}
                 onSetProject={() => setBoardProjectOpen(true)}
                 onConnectClaude={() => setConnectOpen(true)}
+                onEdit={() => setEditBoardOpen(true)}
                 syncing={syncing}
               />
 
@@ -459,6 +462,14 @@ export default function App() {
       />
 
       <ConnectClaudeDialog board={activeBoard} open={connectOpen} onOpenChange={setConnectOpen} />
+
+      <EditBoardDialog
+        board={activeBoard}
+        projects={projects}
+        open={editBoardOpen}
+        onOpenChange={setEditBoardOpen}
+        onSaved={() => void refresh()}
+      />
 
       <WhatsAppPanel
         board={activeBoard}

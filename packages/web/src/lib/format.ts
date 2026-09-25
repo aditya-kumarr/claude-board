@@ -1,4 +1,4 @@
-import type { BoardWindow, Priority } from "./types";
+import type { BoardWindow, DurationKind, Priority } from "./types";
 
 const DAY_MS = 86_400_000;
 
@@ -77,3 +77,34 @@ export function fromLocalInputValue(value: string): string | null {
 }
 
 export const PRIORITY_RANK: Record<Priority, number> = { urgent: 0, high: 1, medium: 2, low: 3 };
+
+/**
+ * Where a board's window would end, worked out the way the server does, so the
+ * deadline is visible before saving. `customDate` is a `YYYY-MM-DD` input value
+ * and only matters for a custom window. Null until a custom date is picked.
+ */
+export function previewBoardEnd(kind: DurationKind, customDate: string): Date | null {
+  const now = new Date();
+  const end = (() => {
+    switch (kind) {
+      case "day":
+        return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59);
+      case "week": {
+        const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7) + 6);
+        monday.setHours(23, 59);
+        return monday;
+      }
+      case "month":
+        return new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59);
+      case "quarter":
+        return new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3 + 3, 0, 23, 59);
+      case "year":
+        return new Date(now.getFullYear(), 11, 31, 23, 59);
+      case "custom":
+        return customDate ? new Date(`${customDate}T23:59`) : null;
+    }
+  })();
+  return end && !Number.isNaN(end.getTime()) ? end : null;
+}
+

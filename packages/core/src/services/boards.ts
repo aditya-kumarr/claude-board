@@ -297,10 +297,20 @@ export function updateBoard(boardId: string, input: UpdateBoardInput, actor: Act
         { durationKind: input.durationKind, endsAt: input.endsAt },
       );
     }
+    // Moving a board to a custom end is moving its deadline, not restarting it: a
+    // week board given a custom end keeps the days already behind it. Only an end
+    // earlier than the old start pulls the start in, since a window cannot end
+    // before it begins. Every other kind switch still re-derives from its period.
+    let keptStart: string | undefined;
+    if (kind === "custom" && input.startsAt === undefined && input.anchor === undefined) {
+      const end = parseDate(input.endsAt ?? existing.endsAt, "endsAt");
+      const dayOfEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+      keptStart = new Date(existing.startsAt) < end ? existing.startsAt : dayOfEnd.toISOString();
+    }
     const window = resolveWindow({
       durationKind: kind,
       anchor: input.anchor ?? (kind === existing.durationKind ? existing.startsAt : undefined),
-      startsAt: input.startsAt ?? (input.anchor || input.durationKind ? undefined : existing.startsAt),
+      startsAt: input.startsAt ?? keptStart ?? (input.anchor || input.durationKind ? undefined : existing.startsAt),
       endsAt: input.endsAt ?? (kind === "custom" ? existing.endsAt : undefined),
     });
     newEndsAt = window.endsAt.toISOString();

@@ -9,6 +9,7 @@ import {
   Loader2,
   MessageCircle,
   MoreHorizontal,
+  Pencil,
   Plus,
   SlidersHorizontal,
   Sparkles,
@@ -53,6 +54,7 @@ export function BoardHeader({
   onOpenWhatsApp,
   onSetProject,
   onConnectClaude,
+  onEdit,
   syncing,
 }: {
   detail: BoardDetail;
@@ -73,6 +75,8 @@ export function BoardHeader({
   onSetProject: () => void;
   /** Shows how to give a Claude Code session in another project this board. */
   onConnectClaude: () => void;
+  /** Opens the board editor — name, deadline, description, project. */
+  onEdit: () => void;
   /** True while the queue request itself is in flight. */
   syncing: boolean;
 }) {
@@ -88,6 +92,17 @@ export function BoardHeader({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h1 className="truncate text-lg font-semibold tracking-tight">{board.name}</h1>
+            <Hint label="Edit board — name, deadline, project" side="bottom">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onEdit}
+                aria-label="Edit board"
+                className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
+              >
+                <Pencil className="size-3.5" />
+              </Button>
+            </Hint>
             {board.archived ? <Badge variant="outline">archived</Badge> : null}
             {expired ? (
               <Badge variant="destructive" className="gap-1">
@@ -174,6 +189,9 @@ export function BoardHeader({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuLabel>{board.id}</DropdownMenuLabel>
+              <DropdownMenuItem onSelect={onEdit}>
+                <Pencil /> Edit board…
+              </DropdownMenuItem>
               <DropdownMenuItem onSelect={onSetProject}>
                 <FolderGit2 /> {detail.project ? "Change project" : "Set a project"}
               </DropdownMenuItem>
