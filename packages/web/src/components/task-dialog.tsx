@@ -4,6 +4,7 @@ import {
   AtSign,
   Ban,
   Check,
+  ChevronRight,
   CircleDashed,
   Clock,
   FolderGit2,
@@ -512,81 +513,95 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
                 </div>
               </div>
             ) : (
-              <dl className="grid gap-x-5 gap-y-3 sm:grid-cols-2">
-                <ReadField label="State">
-                  <span className="inline-flex items-center gap-2">
-                    <span className="size-2 rounded-full" style={{ backgroundColor: kindColor(column.kind) }} />
-                    {column.name}
-                  </span>
-                </ReadField>
-
-                <ReadField label="Assignee">
-                  {assignee ? (
+              <CollapsibleSection
+                id="details"
+                label="Details"
+                summary={[
+                  column.name,
+                  assignee?.displayName ?? "Unassigned",
+                  PRIORITY_LABELS[task.priority],
+                  task.dueAt ? `due ${formatDateTime(task.dueAt)}${overdue ? " (overdue)" : ""}` : "no due date",
+                  effectiveProject?.name,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              >
+                <dl className="grid gap-x-5 gap-y-3 sm:grid-cols-2">
+                  <ReadField label="State">
                     <span className="inline-flex items-center gap-2">
-                      <Avatar
-                        name={assignee.displayName}
-                        tint={assignee.id === "claude" ? "var(--primary)" : "var(--kind-active)"}
-                        size="sm"
-                      />
-                      {assignee.displayName}
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-2 text-muted-foreground">
-                      <UserIcon className="size-3.5" /> Unassigned
-                    </span>
-                  )}
-                </ReadField>
-
-                <ReadField label="Priority">
-                  <span className="inline-flex items-center gap-2">
-                    <span className="size-2 rounded-full" style={{ backgroundColor: priorityColor(task.priority) }} />
-                    {PRIORITY_LABELS[task.priority]}
-                  </span>
-                </ReadField>
-
-                <ReadField label="Due">
-                  {task.dueAt ? (
-                    <span className={cn("inline-flex items-center gap-1.5", overdue && "font-medium text-destructive")}>
-                      {formatDateTime(task.dueAt)}
-                      {overdue ? <span className="text-[11px] uppercase tracking-wide">overdue</span> : null}
-                    </span>
-                  ) : (
-                    <span className="text-muted-foreground">No due date</span>
-                  )}
-                </ReadField>
-
-                <ReadField label="Project">
-                  {effectiveProject ? (
-                    <Hint
-                      label={`${effectiveProject.path} — ${taskProject ? "set on this card" : "inherited from the board"}`}
-                    >
-                      <span className="inline-flex items-center gap-2">
-                        <FolderGit2 className="size-3.5 shrink-0" style={{ color: "var(--kind-review)" }} />
-                        <span className="truncate">{effectiveProject.name}</span>
-                        <span className="font-mono text-[10.5px] text-muted-foreground">
-                          {shortPath(effectiveProject.path)}
-                        </span>
-                        {taskProject && boardProject && taskProject.id !== boardProject.id ? (
-                          <Badge variant="outline">overrides the board</Badge>
-                        ) : null}
-                      </span>
-                    </Hint>
-                  ) : (
-                    <span className="inline-flex items-center gap-2 text-muted-foreground">
-                      <FolderGit2 className="size-3.5" /> None
-                    </span>
-                  )}
-                </ReadField>
-
-                {task.completedAt ? (
-                  <ReadField label="Completed">
-                    <span className="inline-flex items-center gap-1.5" style={{ color: kindColor("done") }}>
-                      <Check className="size-3.5" />
-                      {formatDateTime(task.completedAt)}
+                      <span className="size-2 rounded-full" style={{ backgroundColor: kindColor(column.kind) }} />
+                      {column.name}
                     </span>
                   </ReadField>
-                ) : null}
-              </dl>
+
+                  <ReadField label="Assignee">
+                    {assignee ? (
+                      <span className="inline-flex items-center gap-2">
+                        <Avatar
+                          name={assignee.displayName}
+                          tint={assignee.id === "claude" ? "var(--primary)" : "var(--kind-active)"}
+                          size="sm"
+                        />
+                        {assignee.displayName}
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-2 text-muted-foreground">
+                        <UserIcon className="size-3.5" /> Unassigned
+                      </span>
+                    )}
+                  </ReadField>
+
+                  <ReadField label="Priority">
+                    <span className="inline-flex items-center gap-2">
+                      <span className="size-2 rounded-full" style={{ backgroundColor: priorityColor(task.priority) }} />
+                      {PRIORITY_LABELS[task.priority]}
+                    </span>
+                  </ReadField>
+
+                  <ReadField label="Due">
+                    {task.dueAt ? (
+                      <span className={cn("inline-flex items-center gap-1.5", overdue && "font-medium text-destructive")}>
+                        {formatDateTime(task.dueAt)}
+                        {overdue ? <span className="text-[11px] uppercase tracking-wide">overdue</span> : null}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">No due date</span>
+                    )}
+                  </ReadField>
+
+                  <ReadField label="Project">
+                    {effectiveProject ? (
+                      <Hint
+                        label={`${effectiveProject.path} — ${taskProject ? "set on this card" : "inherited from the board"}`}
+                      >
+                        <span className="inline-flex items-center gap-2">
+                          <FolderGit2 className="size-3.5 shrink-0" style={{ color: "var(--kind-review)" }} />
+                          <span className="truncate">{effectiveProject.name}</span>
+                          <span className="font-mono text-[10.5px] text-muted-foreground">
+                            {shortPath(effectiveProject.path)}
+                          </span>
+                          {taskProject && boardProject && taskProject.id !== boardProject.id ? (
+                            <Badge variant="outline">overrides the board</Badge>
+                          ) : null}
+                        </span>
+                      </Hint>
+                    ) : (
+                      <span className="inline-flex items-center gap-2 text-muted-foreground">
+                        <FolderGit2 className="size-3.5" /> None
+                      </span>
+                    )}
+                  </ReadField>
+
+                  {task.completedAt ? (
+                    <ReadField label="Completed">
+                      <span className="inline-flex items-center gap-1.5" style={{ color: kindColor("done") }}>
+                        <Check className="size-3.5" />
+                        {formatDateTime(task.completedAt)}
+                      </span>
+                    </ReadField>
+                  ) : null}
+                </dl>
+              </CollapsibleSection>
             )}
 
             {editing ? (
@@ -619,12 +634,13 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
             {/* Right under the description: on a bug reported in a chat, the
                 screenshot usually is the description. */}
             {photos.length > 0 ? (
-              <section className="space-y-1.5">
-                <SectionLabel>
-                  {photos.length === 1 ? "Photo from the chat" : `Photos from the chat · ${photos.length}`}
-                </SectionLabel>
+              <CollapsibleSection
+                id="photos"
+                label={photos.length === 1 ? "Photo from the chat" : `Photos from the chat · ${photos.length}`}
+                summary={photos.length === 1 ? "1 photo" : `${photos.length} photos`}
+              >
                 <PhotoCarousel photos={photos} />
-              </section>
+              </CollapsibleSection>
             ) : null}
 
             {column.kind === "blocked" || task.blockedReason ? (
@@ -926,6 +942,69 @@ const ReadField = ({ label, children }: { label: string; children: React.ReactNo
     <dd className="text-[13px] text-card-foreground">{children}</dd>
   </div>
 );
+
+/** Whether a collapsible section is open, remembered per section in this browser. */
+function useSectionOpen(id: string): [boolean, () => void] {
+  const key = `automation.taskDialog.${id}.open`;
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem(key) !== "false";
+    } catch {
+      return true;
+    }
+  });
+  const toggle = () =>
+    setOpen((current) => {
+      try {
+        localStorage.setItem(key, String(!current));
+      } catch {
+        // Private window or blocked storage: it just will not be remembered.
+      }
+      return !current;
+    });
+  return [open, toggle];
+}
+
+/**
+ * A read-only block that folds away. Remembered across cards rather than per
+ * card: someone who closes the photos is saying they do not want them in the
+ * way, not that this one card's photos were dull. Collapsed, the heading keeps
+ * a one-line summary so the section still says what is in it.
+ */
+function CollapsibleSection({
+  id,
+  label,
+  summary,
+  children,
+}: {
+  id: string;
+  label: string;
+  summary?: string;
+  children: React.ReactNode;
+}) {
+  const [open, toggle] = useSectionOpen(id);
+  return (
+    <section className="space-y-1.5">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className="group flex w-full min-w-0 items-center gap-1.5 text-left"
+      >
+        <ChevronRight
+          className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", open && "rotate-90")}
+        />
+        <span className="shrink-0 text-xs font-medium uppercase tracking-wide text-muted-foreground group-hover:text-foreground">
+          {label}
+        </span>
+        {!open && summary ? (
+          <span className="min-w-0 truncate text-[12px] text-muted-foreground">· {summary}</span>
+        ) : null}
+      </button>
+      {open ? children : null}
+    </section>
+  );
+}
 
 /** Heading for a read-only block — `Label` styling without a control to point at. */
 const SectionLabel = ({ children }: { children: React.ReactNode }) => (

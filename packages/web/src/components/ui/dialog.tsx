@@ -35,6 +35,11 @@ export const DialogContent = React.forwardRef<
       ref={ref}
       className={cn(
         "fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4",
+        // One column that may never grow past the dialog. A grid track sizes to its
+        // content's min-content width by default, so one long line in a code block
+        // or an unbroken path widened the whole dialog and scrolled it sideways,
+        // instead of the block scrolling inside itself.
+        "grid-cols-[minmax(0,1fr)]",
         "max-h-[92vh] overflow-y-auto scrollbar-slim",
         "rounded-lg border border-border bg-elevated p-5 shadow-2xl",
         "data-[state=open]:animate-[dialogIn_180ms_cubic-bezier(0.16,1,0.3,1)]",
