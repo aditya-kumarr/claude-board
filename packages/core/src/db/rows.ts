@@ -381,6 +381,8 @@ export const toComment = (row: CommentRow): TaskComment => ({
   // cast rather than a parse — the CHECK constraint is what keeps it true.
   kind: (row.kind ?? "note") as CommentKind,
   createdAt: row.created_at,
+  // Filled in by listComments, which reads them for the whole thread at once.
+  attachments: [],
 });
 
 export const toMention = (row: MentionRow): Mention => ({

@@ -98,6 +98,8 @@ import {
   renderWhatsAppImport,
   renderWhatsAppQueue,
 } from "./format.ts";
+import { readFileSync, statSync } from "node:fs";
+import { basename, isAbsolute } from "node:path";
 import { applyScope, currentScope, SCOPED_OUT } from "./scope.ts";
 
 const log = createLogger("mcp");
@@ -723,10 +725,15 @@ export function registerTools(mcp: McpServer): void {
     {
       title: "Comment on a task",
       description:
-        "Append a comment as Claude. This is the channel for reporting progress, findings, questions or hand-offs on work assigned to you — the human sees it on the card in the web UI, and on a request you are carrying out unattended it is the ONLY thing they see until you finish. Use it as you work, not just at the end: say what you are about to do, then what it turned out to be. Set `kind` so the thread stays readable — a blocker rendered as one more paragraph of narration is a blocker they will miss. The body is rendered as markdown, so headings, lists, **bold** and fenced code blocks all display properly. Note that when the *human* writes @claude in a comment it becomes a tracked request you are expected to act on (see the mentions tool); your own comments never create one.",
+        "Append a comment as Claude, optionally with images (a screenshot of the bug, of the fix, of an error) given as absolute paths to image files on this machine. This is the channel for reporting progress, findings, questions or hand-offs on work assigned to you — the human sees it on the card in the web UI, and on a request you are carrying out unattended it is the ONLY thing they see until you finish. Use it as you work, not just at the end: say what you are about to do, then what it turned out to be. Set `kind` so the thread stays readable — a blocker rendered as one more paragraph of narration is a blocker they will miss. The body is rendered as markdown, so headings, lists, **bold** and fenced code blocks all display properly. Note that when the *human* writes @claude in a comment it becomes a tracked request you are expected to act on (see the mentions tool); your own comments never create one.",
       inputSchema: {
         taskId: z.string(),
-        body: z.string().describe("Comment text, up to 4000 characters. Rendered as markdown."),
+        body: z.string().describe("Comment text, up to 4000 characters. Rendered as markdown. May be empty when images are given."),
+        images: z
+          .array(z.string())
+          .max(6)
+          .optional()
+          .describe("Absolute paths of up to 6 images (PNG, JPEG, GIF, WebP; 10MB each) to attach, e.g. a screenshot you took."),
         kind: z
           .enum(["note", "progress", "blocker", "result"])
           .optional()
@@ -738,14 +745,27 @@ export function registerTools(mcp: McpServer): void {
           ),
       },
     },
-    handler("task_comment", (args: { taskId: string; body: string; kind?: CommentKind }, ctx) => {
+    handler("task_comment", (args: { taskId: string; body: string; kind?: CommentKind; images?: string[] }, ctx) => {
       const kind = args.kind ?? "note";
       if (kind === "result") {
         throw badRequest("kind=result is written by mention_resolve, not by hand — use progress, blocker or note", {
           taskId: args.taskId,
         });
       }
-      addComment(args.taskId, args.body, ctx, kind);
+      // Read here, in the transport, because a path is only meaningful to a
+      // process on this machine. Core checks what the bytes are either way.
+      const images = (args.images ?? []).map((path) => {
+        if (!isAbsolute(path)) throw badRequest(`image path must be absolute: ${path}`);
+        let size: number;
+        try {
+          size = statSync(path).size;
+        } catch {
+          throw badRequest(`no file at ${path}`);
+        }
+        if (size > 10 * 1024 * 1024) throw badRequest(`${path} is larger than 10MB`);
+        return { filename: basename(path), bytes: new Uint8Array(readFileSync(path)) };
+      });
+      addComment(args.taskId, args.body, ctx, kind, images);
       // A narrating run calls this several times per job, and echoing the whole
       // card back each time buries the work it is actually doing. The full render
       // is for the orienting case (a plain note); a step gets an acknowledgement.

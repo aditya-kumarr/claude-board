@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { Hint } from "@/components/ui/tooltip";
 import { api, ApiError } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
+import { humanBytes, toBase64 } from "@/lib/files";
 import type {
   BoardDetail,
   IntakeAttachment,
@@ -42,22 +43,6 @@ interface Staged {
   file: File;
   /** Object URL for an image, so it can be seen before it is sent. */
   preview: string | null;
-}
-
-const humanBytes = (bytes: number): string =>
-  bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-
-/** Base64 without the data-URL prefix, which is what the API wants. */
-async function toBase64(file: File): Promise<string> {
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  // Chunked: `String.fromCharCode(...bytes)` on a 10MB file blows the argument limit.
-  const CHUNK = 0x8000;
-  for (let index = 0; index < bytes.length; index += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + CHUNK));
-  }
-  return btoa(binary);
 }
 
 /**

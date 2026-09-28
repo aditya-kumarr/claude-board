@@ -14,6 +14,7 @@ import { newId, slugify } from "../lib/ids.ts";
 import { createLogger } from "../lib/logger.ts";
 import type { Project, ResolvedProject } from "../types.ts";
 import { record } from "./activity.ts";
+import { removeCommentFiles } from "./comments.ts";
 import type { ActorContext } from "./context.ts";
 
 const log = createLogger("projects");
@@ -399,6 +400,15 @@ export function deleteProject(
     );
   }
 
+  // Read before the delete: afterwards nothing says which folders held their images.
+  const doomedBoards = getDb()
+    .query<{ id: string }, [string]>("SELECT id FROM boards WHERE project_id = ?")
+    .all(projectId)
+    .map((row) => row.id);
+  const doomedTasks = getDb()
+    .query<{ id: string; board_id: string }, [string]>("SELECT id, board_id FROM tasks WHERE project_id = ?")
+    .all(projectId);
+
   write((db) => {
     record(db, actor, "project.deleted", {}, {
       projectId,
@@ -414,6 +424,8 @@ export function deleteProject(
     db.run("DELETE FROM tasks WHERE project_id = ?", [projectId]);
     db.run("DELETE FROM projects WHERE id = ?", [projectId]);
   });
+  for (const boardId of doomedBoards) removeCommentFiles({ boardId });
+  for (const task of doomedTasks) removeCommentFiles({ boardId: task.board_id, taskId: task.id });
 
   log.warn("project deleted", {
     projectId,

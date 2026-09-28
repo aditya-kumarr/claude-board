@@ -9,6 +9,7 @@ import { DEFAULT_COLUMNS } from "../db/schema.ts";
 import type { Board, BoardDetail, BoardStats, DurationKind } from "../types.ts";
 import { USER_CLAUDE, USER_ME } from "../types.ts";
 import { record } from "./activity.ts";
+import { removeCommentFiles } from "./comments.ts";
 import type { ActorContext } from "./context.ts";
 import { listMentions } from "./mentions.ts";
 import { getIntakeSummary } from "./intake.ts";
@@ -378,6 +379,8 @@ export function deleteBoard(boardId: string, actor: ActorContext): { id: string;
     // Columns, tasks and comments go with it via ON DELETE CASCADE.
     db.run("DELETE FROM boards WHERE id = ?", [boardId]);
   });
+  // The comment rows went by cascade; their images are files, and ours to remove.
+  removeCommentFiles({ boardId });
 
   log.warn("board deleted", { boardId, name: board.name, deletedTasks, actor: actor.actorId, source: actor.source });
   return { id: boardId, deletedTasks };

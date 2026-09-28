@@ -590,6 +590,31 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_task_media_media ON task_media (media_id);
     `,
   },
+  {
+    version: 13,
+    name: "comment_attachments",
+    sql: /* sql */ `
+      -- Images on a comment. The thread is the one place every Claude session and
+      -- the user meet over a card, and "here is what it looks like" is half of
+      -- what gets said there: a screenshot of the bug, of the fix, of the error.
+      -- Images only, because an image is what the Read tool can actually look at,
+      -- and anything else posted here would be a file nobody in the thread can open.
+      CREATE TABLE comment_attachments (
+        id         TEXT PRIMARY KEY,
+        comment_id TEXT NOT NULL REFERENCES task_comments(id) ON DELETE CASCADE,
+        task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        filename   TEXT NOT NULL,
+        mime       TEXT NOT NULL,
+        bytes      INTEGER NOT NULL,
+        -- Relative to COMMENT_FILES_DIR, laid out <board>/<task>/<id>.<ext> so
+        -- deleting a card or a board removes its files by removing one folder.
+        path       TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX idx_comment_attachments ON comment_attachments (comment_id);
+    `,
+  },
 ];
 
 /** Assignees exist before any board does, so both transports can reference them. */

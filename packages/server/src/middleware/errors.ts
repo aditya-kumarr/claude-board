@@ -30,6 +30,21 @@ export function errorHandler(error: unknown, req: Request, res: Response, next: 
     return;
   }
 
+  // body-parser's own refusals (too large, malformed JSON) carry a 4xx status.
+  // Reported as what they are, not as a server fault the user cannot act on.
+  const parserError = error as { type?: string; status?: number; limit?: number };
+  if (parserError?.type === "entity.too.large") {
+    logger.warn("request body too large", { path: req.originalUrl, limit: parserError.limit });
+    res.status(413).json({
+      error: { code: "too_large", message: "that upload is too large — send fewer or smaller files", details: { limit: parserError.limit } },
+    });
+    return;
+  }
+  if (parserError?.type === "entity.parse.failed") {
+    res.status(400).json({ error: { code: "bad_request", message: "the request body is not valid JSON" } });
+    return;
+  }
+
   logger.error("unhandled error", { path: req.originalUrl, method: req.method, error });
   res.status(500).json({ error: { code: "internal_error", message: "something went wrong on the server" } });
 }

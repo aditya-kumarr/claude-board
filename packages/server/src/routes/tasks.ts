@@ -1,6 +1,12 @@
-import { Router } from "express";
+import { Router, json } from "express";
+import { createReadStream, existsSync } from "node:fs";
 import {
   addCommentWithMentions,
+  badRequest,
+  commentAttachmentPath,
+  getCommentAttachment,
+  notFound,
+  type CommentImageUpload,
   deleteTask,
   getTaskDetail,
   listActivity,
@@ -33,6 +39,24 @@ tasksRouter.get(
   "/:taskId/photos",
   route((req, res) => {
     res.json({ photos: listTaskPhotos(param(req, "taskId")) });
+  }),
+);
+
+/**
+ * Streams a comment image back. Registered before `/:taskId` routes so the word
+ * "attachments" is never read as a task id. `nosniff` and an image type only,
+ * so nothing uploaded here can be rendered as a page.
+ */
+tasksRouter.get(
+  "/attachments/:attachmentId/content",
+  route((req, res) => {
+    const attachment = getCommentAttachment(param(req, "attachmentId"));
+    const path = commentAttachmentPath(attachment);
+    if (!existsSync(path)) throw notFound("comment image file", attachment.id);
+    res.setHeader("content-type", attachment.mime);
+    res.setHeader("x-content-type-options", "nosniff");
+    res.setHeader("content-disposition", `inline; filename="${attachment.filename.replace(/[^\w.\-]+/g, "_")}"`);
+    createReadStream(path).pipe(res);
   }),
 );
 
@@ -98,13 +122,37 @@ tasksRouter.get(
  * user their `@claude` was actually registered as a request rather than leaving
  * them to guess from a highlighted word.
  */
+/** Six 10MB images plus base64's third again. The app-wide limit skips this route. */
+const commentBody = json({ limit: "88mb" });
+
+/**
+ * Images arrive as base64 inside the JSON, as the intake chat's do. Decoded here
+ * and nowhere else: core validates bytes, and a web client is never able to name
+ * a file on this machine for the server to read — only the MCP tool can do that.
+ */
+function decodeImages(raw: unknown): CommentImageUpload[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw badRequest("images must be a list");
+  return raw.map((entry: { filename?: unknown; mime?: unknown; data?: unknown }) => {
+    if (typeof entry?.data !== "string") throw badRequest("each image needs its data as base64");
+    return {
+      filename: typeof entry.filename === "string" ? entry.filename : "",
+      mime: typeof entry.mime === "string" ? entry.mime : undefined,
+      bytes: new Uint8Array(Buffer.from(entry.data, "base64")),
+    };
+  });
+}
+
 tasksRouter.post(
   "/:taskId/comments",
+  commentBody,
   route((req, res) => {
     const { comment, mentions } = addCommentWithMentions(
       param(req, "taskId"),
       String(req.body?.body ?? ""),
       actorFrom(req),
+      "note",
+      decodeImages(req.body?.images),
     );
     res.status(201).json({ ...comment, mentions });
   }),

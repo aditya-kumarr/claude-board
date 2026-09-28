@@ -5,7 +5,7 @@ export * from "./lib/mentions.ts";
 export * from "./lib/ids.ts";
 export { isReadablePhoto, mediaKindOf, parseWhatsAppChat, type DateOrder } from "./lib/whatsapp.ts";
 export { createLogger, currentLogFile, isoWeekKey, logLevel, type Logger, type LogContext, type LogLevel } from "./lib/logger.ts";
-export { DB_PATH, INTAKE_DIR, LOG_DIR, REPO_ROOT, WHATSAPP_DIR } from "./lib/paths.ts";
+export { COMMENT_FILES_DIR, DB_PATH, INTAKE_DIR, LOG_DIR, REPO_ROOT, WHATSAPP_DIR } from "./lib/paths.ts";
 export { getDb, closeDb, getRevision, write } from "./db/index.ts";
 export { DEFAULT_COLUMNS, SEED_USERS } from "./db/schema.ts";
 export * from "./services/boards.ts";

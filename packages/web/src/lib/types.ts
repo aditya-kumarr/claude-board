@@ -121,13 +121,25 @@ export interface TaskWithContext extends Task {
  */
 export type CommentKind = "note" | "progress" | "blocker" | "result";
 
+/** An image on a comment. */
+export interface CommentAttachment {
+  id: string;
+  commentId: string;
+  filename: string;
+  mime: string;
+  bytes: number;
+  path: string;
+}
+
 export interface TaskComment {
   id: string;
   taskId: string;
   authorId: string;
+  /** May be empty when the comment is only images. */
   body: string;
   kind: CommentKind;
   createdAt: string;
+  attachments: CommentAttachment[];
 }
 
 export type MentionStatus = "pending" | "claimed" | "answered" | "dismissed";

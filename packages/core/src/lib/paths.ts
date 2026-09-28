@@ -28,6 +28,8 @@ export const INTAKE_DIR = fromEnv("AUTOMATION_INTAKE_DIR", "data/intake");
  * paths relative to it. The zip itself is never kept.
  */
 export const WHATSAPP_DIR = fromEnv("AUTOMATION_WHATSAPP_DIR", "data/whatsapp");
+/** Images attached to comments. Rows store paths relative to it, like the two above. */
+export const COMMENT_FILES_DIR = fromEnv("AUTOMATION_COMMENT_FILES_DIR", "data/comment-files");
 
 export function ensureDir(path: string): string {
   mkdirSync(path, { recursive: true });

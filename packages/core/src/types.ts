@@ -267,13 +267,26 @@ export type CommentKind = (typeof COMMENT_KINDS)[number];
 /** Kinds only an agent narrating its own work should write. */
 export const AGENT_COMMENT_KINDS: readonly CommentKind[] = ["progress", "blocker", "result"];
 
+/** An image on a comment. */
+export interface CommentAttachment {
+  id: string;
+  commentId: string;
+  filename: string;
+  mime: string;
+  bytes: number;
+  /** Relative to `COMMENT_FILES_DIR`. */
+  path: string;
+}
+
 export interface TaskComment {
   id: string;
   taskId: string;
   authorId: string;
+  /** May be empty when the comment is only images. */
   body: string;
   kind: CommentKind;
   createdAt: string;
+  attachments: CommentAttachment[];
 }
 
 /** An `@claude` in a comment, promoted to a tracked request. */

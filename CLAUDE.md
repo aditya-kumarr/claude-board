@@ -214,7 +214,7 @@ go through `write()` or the UI will not notice it.
   (found through the fingerprint, which is what makes cards made before linking existed show anything)
   with `task_media` rows written by `whatsapp_link_photos`, in chat order. Linking takes only kept
   photos from an import on the card's *own* board — anything else would move a screenshot between
-  boards. The task dialog fetches `GET /api/tasks/:id/photos` on the revision poll, because a link does
+  boards. The task sheet fetches `GET /api/tasks/:id/photos` on the revision poll, because a link does
   not touch the task row, and shows one image or a carousel.
 - **A project is a directory, and a card's project is where its work happens.** `projects`
   holds absolute paths on this machine, validated at registration (`services/projects.ts`) rather
@@ -368,7 +368,7 @@ exists, with the completion one surfacing later when the card is done.
 
 The UI shows them as boxes on the card, each with the first lines of the actual message, because a
 box that had to be opened to be worth anything means one click per card to find the one needing work.
-Opening a box slides a sheet over the dialog: the message is the hero, with a chat box under it and a
+Opening a box slides a second sheet over the card's: the message is the hero, with a chat box under it and a
 manual editor behind one button. Both routes to a change land in the same thread.
 
 ### Inbox sync
@@ -505,6 +505,16 @@ shadcn-style primitives in `components/ui/`. Colours come from CSS variables onl
 
 Drag-and-drop is native HTML5 (no dnd library). The drop index is computed from the pointer's
 position against each card's midpoint in `board-column.tsx`.
+
+**The task view is a sheet, and its thread is a chat.** Half the page from 1280px up, three
+quarters below. The thread scrolls with the rest of the card and the composer is pinned under it,
+because the thread is the one conversation every Claude session on a card and the user share.
+Comments carry images (`comment_attachments`, files under `COMMENT_FILES_DIR/<board>/<task>/`,
+removed with the card or board): the UI sends base64, `task_comment` takes absolute paths — only the
+MCP transport may name a file on this machine — and every thread render hands a session each
+image's path to `Read`. Images only, because an image is what `Read` can look at. Routes that take
+files (`intake`, `whatsapp`, comment POST) are skipped by the app-wide 256kb JSON parser and read
+their own body; without the skip that parser refused a screenshot before the route's limit applied.
 
 **Claude's comments are markdown; the human's are not.** `components/markdown.tsx` parses the
 subset an agent writing a status update actually uses — headings, nested lists, fenced and inline

@@ -1,5 +1,6 @@
 import {
   humanizeDuration,
+  commentAttachmentPath,
   listComments,
   projectPathExists,
   type ActivityEntry,
@@ -335,10 +336,17 @@ const COMMENT_KIND_TAG: Record<CommentKind, string> = {
 export function renderComments(comments: TaskComment[]): string {
   if (comments.length === 0) return "  (no comments)";
   return comments
-    .map(
-      (comment) =>
-        `  [${shortDate(comment.createdAt)}] ${who(comment.authorId)}${COMMENT_KIND_TAG[comment.kind] ?? ""}: ${comment.body}`,
-    )
+    .map((comment) => {
+      const head = `  [${shortDate(comment.createdAt)}] ${who(comment.authorId)}${COMMENT_KIND_TAG[comment.kind] ?? ""}: ${
+        comment.body || "(images only)"
+      }`;
+      // The path, not just the name: a screenshot in the thread is often the whole
+      // report, and a session can only look at it by opening the file.
+      const images = comment.attachments.map(
+        (image) => `      image ${image.filename} (${humanBytes(image.bytes)})  open with Read: ${commentAttachmentPath(image)}`,
+      );
+      return [head, ...images].join("\n");
+    })
     .join("\n");
 }
 

@@ -19,13 +19,21 @@ const PORT = Number(process.env.PORT ?? 4000);
 // set HOST=0.0.0.0 only to reach the board directly over the LAN without the tunnel.
 const HOST = process.env.HOST ?? "127.0.0.1";
 
+/** POST routes that parse their own (larger) body: pastes, WhatsApp exports, comment images. */
+const OWN_BODY = [/^\/api\/boards\/[^/]+\/intake\/?$/, /^\/api\/boards\/[^/]+\/whatsapp\/?$/, /^\/api\/tasks\/[^/]+\/comments\/?$/];
+const ownsBody = (method: string, path: string) => method === "POST" && OWN_BODY.some((pattern) => pattern.test(path));
+
 export function createApp(): express.Express {
   const app = express();
   app.disable("x-powered-by");
   // Loopback only, so `req.ip` reflects the dev proxy rather than a spoofed header.
   app.set("trust proxy", "loopback");
   app.use(cors({ origin: true, credentials: false, exposedHeaders: ["x-request-id"] }));
-  app.use(express.json({ limit: "256kb" }));
+  // Small by default. The few routes that take files read their own body with a
+  // larger limit, and must be skipped here: this parser runs first, so without
+  // the skip it rejected a 300kb screenshot before the route's limit was reached.
+  const smallJson = express.json({ limit: "256kb" });
+  app.use((req, res, next) => (ownsBody(req.method, req.path) ? next() : smallJson(req, res, next)));
   app.use(requestLogging);
 
   app.use("/api", metaRouter);

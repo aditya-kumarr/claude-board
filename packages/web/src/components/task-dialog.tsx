@@ -8,15 +8,19 @@ import {
   CircleDashed,
   Clock,
   FolderGit2,
+  ImagePlus,
   Loader2,
   Pencil,
   Send,
   Sparkles,
   Trash2,
   User as UserIcon,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+// Title and description are Radix Dialog parts, so they serve the sheet unchanged.
+import { DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Input, Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -30,6 +34,7 @@ import { ResponseBoxes } from "@/components/response-boxes";
 import { PhotoCarousel } from "@/components/photo-carousel";
 import { ResponsePanel } from "@/components/response-panel";
 import { api, ApiError } from "@/lib/api";
+import { humanBytes, toBase64 } from "@/lib/files";
 import { formatDateTime, relativeTime, toLocalInputValue, fromLocalInputValue } from "@/lib/format";
 import {
   kindColor,
@@ -100,6 +105,18 @@ export interface TaskDialogProps {
  * comment box stays live in both modes — it is the hand-off channel to Claude,
  * not an edit to the card.
  */
+/** Kept in step with core's limits, so a refusal happens before the upload. */
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const MAX_IMAGES = 6;
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+interface StagedImage {
+  key: string;
+  file: File;
+  /** Object URL, revoked when the image is unstaged or sent. */
+  preview: string;
+}
+
 export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClose, onChanged, onError }: TaskDialogProps) {
   const board = boards.find((entry) => entry.tasks.some((task) => task.id === taskId));
   const task = board?.tasks.find((entry) => entry.id === taskId) ?? null;
@@ -113,9 +130,13 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
   const [draft, setDraft] = useState("");
   const [posting, setPosting] = useState(false);
   const draftRef = useRef<HTMLTextAreaElement>(null);
+  /** The sheet's scrolling body. The thread lives in it rather than in a box of its own. */
   const threadRef = useRef<HTMLDivElement>(null);
   /** Was the thread scrolled to the bottom before this render? */
-  const threadPinnedRef = useRef(true);
+  const threadPinnedRef = useRef(false);
+  const [images, setImages] = useState<StagedImage[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const imageInput = useRef<HTMLInputElement>(null);
 
   const [responses, setResponses] = useState<TaskResponseSummary>({ responses: [], activeDraftTurn: null });
   const [openResponseId, setOpenResponseId] = useState<string | null>(null);
@@ -138,7 +159,14 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
   useEffect(() => {
     setEditing(false);
     setOpenResponseId(null);
-    threadPinnedRef.current = true;
+    // A card opens at its top — the details — not scrolled to the end of its
+    // thread. Following new comments starts once the user scrolls down to them.
+    threadPinnedRef.current = false;
+    threadRef.current?.scrollTo({ top: 0 });
+    setImages((current) => {
+      for (const entry of current) URL.revokeObjectURL(entry.preview);
+      return [];
+    });
   }, [taskId]);
 
   useEffect(() => {
@@ -284,13 +312,62 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
     }
   };
 
+  /** Stages images for the next comment; anything but a readable image is refused here. */
+  const addImages = (incoming: FileList | File[] | null | undefined) => {
+    const files = [...(incoming ?? [])];
+    if (files.length === 0) return;
+    const accepted: StagedImage[] = [];
+    for (const file of files) {
+      if (!IMAGE_TYPES.includes(file.type)) {
+        onError(`${file.name || "That file"} is not an image the thread can hold — PNG, JPEG, GIF or WebP.`);
+        continue;
+      }
+      if (file.size === 0) {
+        onError(`${file.name || "That image"} is empty.`);
+        continue;
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        onError(`${file.name || "That image"} is ${humanBytes(file.size)}; the limit is 10 MB.`);
+        continue;
+      }
+      accepted.push({ key: `${file.name}-${file.size}-${file.lastModified}-${Math.random()}`, file, preview: URL.createObjectURL(file) });
+    }
+    setImages((current) => {
+      const next = [...current, ...accepted];
+      if (next.length > MAX_IMAGES) {
+        onError(`Only ${MAX_IMAGES} images per comment — the rest were dropped.`);
+        for (const entry of next.slice(MAX_IMAGES)) URL.revokeObjectURL(entry.preview);
+      }
+      return next.slice(0, MAX_IMAGES);
+    });
+  };
+
+  const unstageImage = (key: string) =>
+    setImages((current) =>
+      current.filter((entry) => {
+        if (entry.key === key) URL.revokeObjectURL(entry.preview);
+        return entry.key !== key;
+      }),
+    );
+
   const postComment = async () => {
-    if (!taskId || !draft.trim()) return;
+    if (!taskId || (!draft.trim() && images.length === 0)) return;
     setPosting(true);
     try {
-      const comment = await api.addComment(taskId, draft.trim());
+      const encoded = await Promise.all(
+        images.map(async (entry) => ({
+          filename: entry.file.name || "pasted-image",
+          mime: entry.file.type || undefined,
+          data: await toBase64(entry.file),
+        })),
+      );
+      const comment = await api.addComment(taskId, draft.trim(), encoded);
+      // Posting is the user joining the conversation, so follow it from here.
+      threadPinnedRef.current = true;
       setComments((current) => [...current, comment]);
       setDraft("");
+      for (const entry of images) URL.revokeObjectURL(entry.preview);
+      setImages([]);
       // The POST reports the requests it raised, but not their joined context, so
       // re-read the thread's mentions rather than guessing at the shape.
       if (comment.mentions.length > 0) {
@@ -348,8 +425,10 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
     open && column.kind !== "done" && task.dueAt !== null && new Date(task.dueAt).getTime() < Date.now();
 
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="max-w-2xl">
+    <Sheet open={open} onOpenChange={(next) => !next && onClose()}>
+      {/* Half the page from 1280px up, three quarters below it: wide enough to read
+          a thread as a conversation, with the board still in view beside it. */}
+      <SheetContent className="w-[75vw] max-w-none xl:w-1/2" aria-describedby={undefined}>
         {open ? (
           <>
             {/* Sits directly under the dialog's close button and matches its shape,
@@ -371,547 +450,649 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
               </button>
             </Hint>
 
-            <DialogHeader className="pr-10">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Badge tint={kindColor(column.kind)}>{column.name}</Badge>
-                <Badge tint={priorityColor(task.priority)}>{PRIORITY_LABELS[task.priority]}</Badge>
-                {task.completedAt ? <Badge tint={kindColor("done")}>completed</Badge> : null}
-                {openMentions.length > 0 ? (
-                  <Badge tint={MENTION_TINT[openMentions[0]!.status]}>
-                    {MENTION_STATUS_LABELS[openMentions[0]!.status]}
-                  </Badge>
-                ) : null}
-                <span className="ml-auto font-mono text-[10px] text-muted-foreground">{task.id}</span>
-              </div>
-              {editing ? (
-                <DialogTitle asChild>
-                  <Input
-                    value={title}
-                    onChange={(event) => setTitle(event.target.value)}
-                    onBlur={() => title.trim() && title !== task.title && void patch({ title: title.trim() })}
-                    onKeyDown={(event) => event.key === "Enter" && event.currentTarget.blur()}
-                    className="h-auto border-0 bg-transparent px-0 text-base font-semibold shadow-none focus:shadow-none"
-                    aria-label="Task title"
-                  />
-                </DialogTitle>
-              ) : (
-                <DialogTitle className="text-[17px] font-semibold leading-snug text-balance">
-                  {task.title}
-                </DialogTitle>
-              )}
-              <DialogDescription>
-                On <span className="font-medium text-foreground">{board.board.name}</span>, which closes{" "}
-                {formatDateTime(board.board.endsAt)} · created by {task.createdBy === "claude" ? "Claude" : "you"}{" "}
-                {relativeTime(task.createdAt)}
-              </DialogDescription>
-            </DialogHeader>
+            <div
+              ref={threadRef}
+              onScroll={(event) => {
+                const body = event.currentTarget;
+                threadPinnedRef.current = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+              }}
+              className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-6 pb-6 pt-5 scrollbar-slim"
+            >
+              <DialogHeader className="pr-10">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge tint={kindColor(column.kind)}>{column.name}</Badge>
+                  <Badge tint={priorityColor(task.priority)}>{PRIORITY_LABELS[task.priority]}</Badge>
+                  {task.completedAt ? <Badge tint={kindColor("done")}>completed</Badge> : null}
+                  {openMentions.length > 0 ? (
+                    <Badge tint={MENTION_TINT[openMentions[0]!.status]}>
+                      {MENTION_STATUS_LABELS[openMentions[0]!.status]}
+                    </Badge>
+                  ) : null}
+                  <span className="ml-auto font-mono text-[10px] text-muted-foreground">{task.id}</span>
+                </div>
+                {editing ? (
+                  <DialogTitle asChild>
+                    <Input
+                      value={title}
+                      onChange={(event) => setTitle(event.target.value)}
+                      onBlur={() => title.trim() && title !== task.title && void patch({ title: title.trim() })}
+                      onKeyDown={(event) => event.key === "Enter" && event.currentTarget.blur()}
+                      className="h-auto border-0 bg-transparent px-0 text-base font-semibold shadow-none focus:shadow-none"
+                      aria-label="Task title"
+                    />
+                  </DialogTitle>
+                ) : (
+                  <DialogTitle className="text-[17px] font-semibold leading-snug text-balance">
+                    {task.title}
+                  </DialogTitle>
+                )}
+                <DialogDescription>
+                  On <span className="font-medium text-foreground">{board.board.name}</span>, which closes{" "}
+                  {formatDateTime(board.board.endsAt)} · created by {task.createdBy === "claude" ? "Claude" : "you"}{" "}
+                  {relativeTime(task.createdAt)}
+                </DialogDescription>
+              </DialogHeader>
 
-            {editing ? (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="State">
-                  <Select value={column.id} onValueChange={(value) => void move(value)}>
-                    <SelectTrigger aria-label="State">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {board.columns.map((entry) => (
-                        <SelectItem key={entry.id} value={entry.id}>
-                          <span className="inline-flex items-center gap-2">
-                            <span className="size-2 rounded-full" style={{ backgroundColor: kindColor(entry.kind) }} />
-                            {entry.name}
+              {editing ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field label="State">
+                    <Select value={column.id} onValueChange={(value) => void move(value)}>
+                      <SelectTrigger aria-label="State">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {board.columns.map((entry) => (
+                          <SelectItem key={entry.id} value={entry.id}>
+                            <span className="inline-flex items-center gap-2">
+                              <span className="size-2 rounded-full" style={{ backgroundColor: kindColor(entry.kind) }} />
+                              {entry.name}
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </Field>
+
+                  <Field label="Assignee" hint="who does it">
+                    <Select
+                      value={task.assigneeId ?? UNASSIGNED}
+                      onValueChange={(value) => void patch({ assignee: value === UNASSIGNED ? null : value })}
+                    >
+                      <SelectTrigger aria-label="Assignee">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={UNASSIGNED}>
+                          <span className="inline-flex items-center gap-2 text-muted-foreground">
+                            <UserIcon className="size-3.5" /> Unassigned
                           </span>
                         </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </Field>
+                        {users.map((user) => (
+                          <SelectItem key={user.id} value={user.id}>
+                            <span className="inline-flex items-center gap-2">
+                              <Avatar
+                                name={user.displayName}
+                                tint={user.id === "claude" ? "var(--primary)" : "var(--kind-active)"}
+                                size="sm"
+                              />
+                              {user.displayName}
+                              {user.kind === "agent" ? (
+                                <span className="text-[10px] text-muted-foreground">does the work</span>
+                              ) : null}
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </Field>
 
-                <Field label="Assignee" hint="who does it">
-                  <Select
-                    value={task.assigneeId ?? UNASSIGNED}
-                    onValueChange={(value) => void patch({ assignee: value === UNASSIGNED ? null : value })}
-                  >
-                    <SelectTrigger aria-label="Assignee">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={UNASSIGNED}>
+                  <Field label="Priority">
+                    <Select value={task.priority} onValueChange={(value) => void patch({ priority: value as Priority })}>
+                      <SelectTrigger aria-label="Priority">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {PRIORITIES.map((priority) => (
+                          <SelectItem key={priority} value={priority}>
+                            <span className="inline-flex items-center gap-2">
+                              <span
+                                className="size-2 rounded-full"
+                                style={{ backgroundColor: priorityColor(priority) }}
+                              />
+                              {PRIORITY_LABELS[priority]}
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </Field>
+
+                  <Field label="Due" hint="within the board window">
+                    <Input
+                      type="datetime-local"
+                      value={toLocalInputValue(task.dueAt)}
+                      min={dueBounds.min}
+                      max={dueBounds.max}
+                      onChange={(event) => void patch({ dueAt: fromLocalInputValue(event.target.value) })}
+                      aria-label="Due date"
+                    />
+                  </Field>
+
+                  <div className="space-y-1.5 sm:col-span-2">
+                    <Label hint="where the work happens">Project</Label>
+                    <ProjectSelect
+                      projects={projects}
+                      value={task.projectId}
+                      inheritFrom={boardProject}
+                      onChange={(projectId) => void patch({ project: projectId })}
+                    />
+                    <p className="text-[11px] leading-snug text-muted-foreground">
+                      {effectiveProject ? (
+                        <>
+                          An <span className="font-medium text-primary">@claude</span> request on this card runs inside{" "}
+                          <span className="font-mono text-[10.5px] text-foreground">{effectiveProject.path}</span> and can
+                          change code there.
+                        </>
+                      ) : (
+                        "With no project, Claude can answer about this card but has no codebase to work in."
+                      )}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <CollapsibleSection
+                  id="details"
+                  label="Details"
+                  summary={[
+                    column.name,
+                    assignee?.displayName ?? "Unassigned",
+                    PRIORITY_LABELS[task.priority],
+                    task.dueAt ? `due ${formatDateTime(task.dueAt)}${overdue ? " (overdue)" : ""}` : "no due date",
+                    effectiveProject?.name,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                >
+                  <dl className="grid gap-x-5 gap-y-3 sm:grid-cols-2">
+                    <ReadField label="State">
+                      <span className="inline-flex items-center gap-2">
+                        <span className="size-2 rounded-full" style={{ backgroundColor: kindColor(column.kind) }} />
+                        {column.name}
+                      </span>
+                    </ReadField>
+
+                    <ReadField label="Assignee">
+                      {assignee ? (
+                        <span className="inline-flex items-center gap-2">
+                          <Avatar
+                            name={assignee.displayName}
+                            tint={assignee.id === "claude" ? "var(--primary)" : "var(--kind-active)"}
+                            size="sm"
+                          />
+                          {assignee.displayName}
+                        </span>
+                      ) : (
                         <span className="inline-flex items-center gap-2 text-muted-foreground">
                           <UserIcon className="size-3.5" /> Unassigned
                         </span>
-                      </SelectItem>
-                      {users.map((user) => (
-                        <SelectItem key={user.id} value={user.id}>
-                          <span className="inline-flex items-center gap-2">
-                            <Avatar
-                              name={user.displayName}
-                              tint={user.id === "claude" ? "var(--primary)" : "var(--kind-active)"}
-                              size="sm"
-                            />
-                            {user.displayName}
-                            {user.kind === "agent" ? (
-                              <span className="text-[10px] text-muted-foreground">does the work</span>
-                            ) : null}
-                          </span>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </Field>
+                      )}
+                    </ReadField>
 
-                <Field label="Priority">
-                  <Select value={task.priority} onValueChange={(value) => void patch({ priority: value as Priority })}>
-                    <SelectTrigger aria-label="Priority">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {PRIORITIES.map((priority) => (
-                        <SelectItem key={priority} value={priority}>
-                          <span className="inline-flex items-center gap-2">
-                            <span
-                              className="size-2 rounded-full"
-                              style={{ backgroundColor: priorityColor(priority) }}
-                            />
-                            {PRIORITY_LABELS[priority]}
-                          </span>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </Field>
-
-                <Field label="Due" hint="within the board window">
-                  <Input
-                    type="datetime-local"
-                    value={toLocalInputValue(task.dueAt)}
-                    min={dueBounds.min}
-                    max={dueBounds.max}
-                    onChange={(event) => void patch({ dueAt: fromLocalInputValue(event.target.value) })}
-                    aria-label="Due date"
-                  />
-                </Field>
-
-                <div className="space-y-1.5 sm:col-span-2">
-                  <Label hint="where the work happens">Project</Label>
-                  <ProjectSelect
-                    projects={projects}
-                    value={task.projectId}
-                    inheritFrom={boardProject}
-                    onChange={(projectId) => void patch({ project: projectId })}
-                  />
-                  <p className="text-[11px] leading-snug text-muted-foreground">
-                    {effectiveProject ? (
-                      <>
-                        An <span className="font-medium text-primary">@claude</span> request on this card runs inside{" "}
-                        <span className="font-mono text-[10.5px] text-foreground">{effectiveProject.path}</span> and can
-                        change code there.
-                      </>
-                    ) : (
-                      "With no project, Claude can answer about this card but has no codebase to work in."
-                    )}
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <CollapsibleSection
-                id="details"
-                label="Details"
-                summary={[
-                  column.name,
-                  assignee?.displayName ?? "Unassigned",
-                  PRIORITY_LABELS[task.priority],
-                  task.dueAt ? `due ${formatDateTime(task.dueAt)}${overdue ? " (overdue)" : ""}` : "no due date",
-                  effectiveProject?.name,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-              >
-                <dl className="grid gap-x-5 gap-y-3 sm:grid-cols-2">
-                  <ReadField label="State">
-                    <span className="inline-flex items-center gap-2">
-                      <span className="size-2 rounded-full" style={{ backgroundColor: kindColor(column.kind) }} />
-                      {column.name}
-                    </span>
-                  </ReadField>
-
-                  <ReadField label="Assignee">
-                    {assignee ? (
+                    <ReadField label="Priority">
                       <span className="inline-flex items-center gap-2">
-                        <Avatar
-                          name={assignee.displayName}
-                          tint={assignee.id === "claude" ? "var(--primary)" : "var(--kind-active)"}
-                          size="sm"
-                        />
-                        {assignee.displayName}
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-2 text-muted-foreground">
-                        <UserIcon className="size-3.5" /> Unassigned
-                      </span>
-                    )}
-                  </ReadField>
-
-                  <ReadField label="Priority">
-                    <span className="inline-flex items-center gap-2">
-                      <span className="size-2 rounded-full" style={{ backgroundColor: priorityColor(task.priority) }} />
-                      {PRIORITY_LABELS[task.priority]}
-                    </span>
-                  </ReadField>
-
-                  <ReadField label="Due">
-                    {task.dueAt ? (
-                      <span className={cn("inline-flex items-center gap-1.5", overdue && "font-medium text-destructive")}>
-                        {formatDateTime(task.dueAt)}
-                        {overdue ? <span className="text-[11px] uppercase tracking-wide">overdue</span> : null}
-                      </span>
-                    ) : (
-                      <span className="text-muted-foreground">No due date</span>
-                    )}
-                  </ReadField>
-
-                  <ReadField label="Project">
-                    {effectiveProject ? (
-                      <Hint
-                        label={`${effectiveProject.path} — ${taskProject ? "set on this card" : "inherited from the board"}`}
-                      >
-                        <span className="inline-flex items-center gap-2">
-                          <FolderGit2 className="size-3.5 shrink-0" style={{ color: "var(--kind-review)" }} />
-                          <span className="truncate">{effectiveProject.name}</span>
-                          <span className="font-mono text-[10.5px] text-muted-foreground">
-                            {shortPath(effectiveProject.path)}
-                          </span>
-                          {taskProject && boardProject && taskProject.id !== boardProject.id ? (
-                            <Badge variant="outline">overrides the board</Badge>
-                          ) : null}
-                        </span>
-                      </Hint>
-                    ) : (
-                      <span className="inline-flex items-center gap-2 text-muted-foreground">
-                        <FolderGit2 className="size-3.5" /> None
-                      </span>
-                    )}
-                  </ReadField>
-
-                  {task.completedAt ? (
-                    <ReadField label="Completed">
-                      <span className="inline-flex items-center gap-1.5" style={{ color: kindColor("done") }}>
-                        <Check className="size-3.5" />
-                        {formatDateTime(task.completedAt)}
+                        <span className="size-2 rounded-full" style={{ backgroundColor: priorityColor(task.priority) }} />
+                        {PRIORITY_LABELS[task.priority]}
                       </span>
                     </ReadField>
-                  ) : null}
-                </dl>
-              </CollapsibleSection>
-            )}
 
-            {editing ? (
-              <Field label="Description">
-                <Textarea
-                  value={description}
-                  placeholder="What does done look like?"
-                  onChange={(event) => setDescription(event.target.value)}
-                  onBlur={() =>
-                    description !== (task.description ?? "") && void patch({ description: description || undefined })
-                  }
-                  className="min-h-32 leading-relaxed"
-                />
-              </Field>
-            ) : (
-              <section className="space-y-1.5">
-                <SectionLabel>Description</SectionLabel>
-                {task.description ? (
-                  <p className="max-w-prose whitespace-pre-wrap break-words rounded-md border border-border/60 bg-surface/50 p-3 text-[13.5px] leading-[1.7] text-card-foreground">
-                    {task.description}
-                  </p>
-                ) : (
-                  <p className="text-[13px] text-muted-foreground">
-                    No description. Use the pencil to add one.
-                  </p>
-                )}
-              </section>
-            )}
+                    <ReadField label="Due">
+                      {task.dueAt ? (
+                        <span className={cn("inline-flex items-center gap-1.5", overdue && "font-medium text-destructive")}>
+                          {formatDateTime(task.dueAt)}
+                          {overdue ? <span className="text-[11px] uppercase tracking-wide">overdue</span> : null}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">No due date</span>
+                      )}
+                    </ReadField>
 
-            {/* Right under the description: on a bug reported in a chat, the
-                screenshot usually is the description. */}
-            {photos.length > 0 ? (
-              <CollapsibleSection
-                id="photos"
-                label={photos.length === 1 ? "Photo from the chat" : `Photos from the chat · ${photos.length}`}
-                summary={photos.length === 1 ? "1 photo" : `${photos.length} photos`}
-              >
-                <PhotoCarousel photos={photos} />
-              </CollapsibleSection>
-            ) : null}
+                    <ReadField label="Project">
+                      {effectiveProject ? (
+                        <Hint
+                          label={`${effectiveProject.path} — ${taskProject ? "set on this card" : "inherited from the board"}`}
+                        >
+                          <span className="inline-flex items-center gap-2">
+                            <FolderGit2 className="size-3.5 shrink-0" style={{ color: "var(--kind-review)" }} />
+                            <span className="truncate">{effectiveProject.name}</span>
+                            <span className="font-mono text-[10.5px] text-muted-foreground">
+                              {shortPath(effectiveProject.path)}
+                            </span>
+                            {taskProject && boardProject && taskProject.id !== boardProject.id ? (
+                              <Badge variant="outline">overrides the board</Badge>
+                            ) : null}
+                          </span>
+                        </Hint>
+                      ) : (
+                        <span className="inline-flex items-center gap-2 text-muted-foreground">
+                          <FolderGit2 className="size-3.5" /> None
+                        </span>
+                      )}
+                    </ReadField>
 
-            {column.kind === "blocked" || task.blockedReason ? (
-              editing ? (
-                <Field label="Blocked because" hint="shown on the card">
-                  <Input
-                    defaultValue={task.blockedReason ?? ""}
-                    placeholder="Waiting on…"
-                    onBlur={(event) =>
-                      event.target.value !== (task.blockedReason ?? "") &&
-                      void patch({ blockedReason: event.target.value || null })
+                    {task.completedAt ? (
+                      <ReadField label="Completed">
+                        <span className="inline-flex items-center gap-1.5" style={{ color: kindColor("done") }}>
+                          <Check className="size-3.5" />
+                          {formatDateTime(task.completedAt)}
+                        </span>
+                      </ReadField>
+                    ) : null}
+                  </dl>
+                </CollapsibleSection>
+              )}
+
+              {editing ? (
+                <Field label="Description">
+                  <Textarea
+                    value={description}
+                    placeholder="What does done look like?"
+                    onChange={(event) => setDescription(event.target.value)}
+                    onBlur={() =>
+                      description !== (task.description ?? "") && void patch({ description: description || undefined })
                     }
-                    className="border-l-2"
-                    style={{ borderLeftColor: kindColor("blocked") }}
+                    className="min-h-32 leading-relaxed"
                   />
                 </Field>
               ) : (
                 <section className="space-y-1.5">
-                  <SectionLabel>Blocked because</SectionLabel>
-                  <p
-                    className="whitespace-pre-wrap break-words border-l-2 pl-3 text-[13.5px] leading-relaxed text-card-foreground"
-                    style={{ borderLeftColor: kindColor("blocked") }}
-                  >
-                    {task.blockedReason ?? "Reason not recorded."}
-                  </p>
-                </section>
-              )
-            ) : null}
-
-            <Separator />
-
-            {/* Above the thread on purpose: on a card that came out of somebody's
-                mail, the reply owed back is the point of the card, and the thread
-                is the conversation *about* it. */}
-            <ResponseBoxes
-              summary={responses}
-              imported={task.sourceRef !== null}
-              busy={draftingReplies}
-              onOpen={(response) => setOpenResponseId(response.id)}
-              onRequestDrafts={() => void requestDrafts()}
-              onCancelDrafts={() => void cancelDrafts()}
-            />
-
-            <Separator />
-
-            <section className="space-y-2">
-              <h3 className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Thread
-                <span className="rounded-full bg-muted px-1.5 text-[10px]">{comments.length}</span>
-              </h3>
-
-              {/* Says out loud that the ask was registered. Without it a highlighted
-                  word is the only evidence, which is not evidence. */}
-              {openMentions.length > 0 ? (
-                <div
-                  className="flex items-start gap-2 rounded-md border px-2.5 py-2 text-[12.5px] leading-relaxed"
-                  style={{
-                    borderColor: `color-mix(in oklab, ${MENTION_TINT[openMentions[0]!.status]} 35%, transparent)`,
-                    backgroundColor: `color-mix(in oklab, ${MENTION_TINT[openMentions[0]!.status]} 8%, transparent)`,
-                  }}
-                >
-                  {openMentions[0]!.status === "claimed" ? (
-                    <Loader2 className="mt-0.5 size-3.5 shrink-0 animate-spin" style={{ color: MENTION_TINT.claimed }} />
+                  <SectionLabel>Description</SectionLabel>
+                  {task.description ? (
+                    <p className="max-w-prose whitespace-pre-wrap break-words rounded-md border border-border/60 bg-surface/50 p-3 text-[13.5px] leading-[1.7] text-card-foreground">
+                      {task.description}
+                    </p>
                   ) : (
-                    <Sparkles className="mt-0.5 size-3.5 shrink-0" style={{ color: MENTION_TINT.pending }} />
+                    <p className="text-[13px] text-muted-foreground">
+                      No description. Use the pencil to add one.
+                    </p>
                   )}
-                  <div className="min-w-0">
-                    <p className="font-medium" style={{ color: MENTION_TINT[openMentions[0]!.status] }}>
-                      {openMentions.length === 1
-                        ? MENTION_STATUS_LABELS[openMentions[0]!.status]
-                        : `${openMentions.length} requests waiting for Claude`}
-                    </p>
-                    <p className="text-muted-foreground">
-                      {openMentions[0]!.status === "claimed"
-                        ? "Claude is on it and posts each step in the thread below as it goes."
-                        : "Claude answers in this thread — next time it reads the board, or straight away if the mention watcher is running."}
-                    </p>
-                  </div>
-                </div>
+                </section>
+              )}
+
+              {/* Right under the description: on a bug reported in a chat, the
+                  screenshot usually is the description. */}
+              {photos.length > 0 ? (
+                <CollapsibleSection
+                  id="photos"
+                  label={photos.length === 1 ? "Photo from the chat" : `Photos from the chat · ${photos.length}`}
+                  summary={photos.length === 1 ? "1 photo" : `${photos.length} photos`}
+                >
+                  <PhotoCarousel photos={photos} />
+                </CollapsibleSection>
               ) : null}
 
-              <div
-                ref={threadRef}
-                onScroll={(event) => {
-                  const thread = event.currentTarget;
-                  threadPinnedRef.current = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 40;
-                }}
-                className="max-h-72 space-y-2 overflow-y-auto pr-1 scrollbar-slim"
-              >
-                {comments.length === 0 ? (
-                  <p className="py-2 text-xs text-muted-foreground">
-                    No comments yet. Claude posts each step of its work here — and write{" "}
-                    <span className="font-medium text-primary">@claude</span> to ask it for something on this card.
-                  </p>
+              {column.kind === "blocked" || task.blockedReason ? (
+                editing ? (
+                  <Field label="Blocked because" hint="shown on the card">
+                    <Input
+                      defaultValue={task.blockedReason ?? ""}
+                      placeholder="Waiting on…"
+                      onBlur={(event) =>
+                        event.target.value !== (task.blockedReason ?? "") &&
+                        void patch({ blockedReason: event.target.value || null })
+                      }
+                      className="border-l-2"
+                      style={{ borderLeftColor: kindColor("blocked") }}
+                    />
+                  </Field>
                 ) : (
-                  comments.map((comment) => {
-                    const author = users.find((user) => user.id === comment.authorId);
-                    const isAgent = author?.kind === "agent";
-                    const ask = mentionByComment.get(comment.id);
-                    const kind = comment.kind === "note" ? null : COMMENT_KIND[comment.kind];
-                    const KindIcon = kind?.icon;
-                    // A comment that asked for something is left-ruled in its
-                    // request's colour, so the thread shows at a glance which
-                    // notes were asks and which were just notes. A result rules
-                    // itself the same way; a blocker takes the whole card,
-                    // because it is the one comment asking the user to act.
-                    const rule = ask
-                      ? { borderLeftWidth: 2, borderLeftColor: MENTION_TINT[ask.status] }
-                      : comment.kind === "blocker" && kind
-                        ? {
-                            borderLeftWidth: 2,
-                            borderLeftColor: kind.tint,
-                            borderColor: `color-mix(in oklab, ${kind.tint} 40%, transparent)`,
-                            backgroundColor: `color-mix(in oklab, ${kind.tint} 8%, transparent)`,
-                          }
-                        : comment.kind === "result" && kind
-                          ? { borderLeftWidth: 2, borderLeftColor: kind.tint }
-                          : undefined;
-                    return (
-                      <div
-                        key={comment.id}
-                        className={cn(
-                          "rounded-md border p-2.5 text-[13px] leading-relaxed",
-                          isAgent ? "border-primary/25 bg-primary/8" : "border-border/70 bg-surface/60",
-                          // A step in a long run is the background noise of the
-                          // thread; the blocker and the result are the two the
-                          // user came to read, so only those keep full weight.
-                          comment.kind === "progress" && "border-border/60 bg-surface/50",
-                        )}
-                        style={rule}
-                      >
-                        <div className="mb-1 flex items-center gap-2">
-                          <Avatar
-                            name={author?.displayName ?? comment.authorId}
-                            tint={isAgent ? "var(--primary)" : "var(--kind-active)"}
-                            size="sm"
-                          />
-                          <span className="text-xs font-medium">{author?.displayName ?? comment.authorId}</span>
-                          {kind && KindIcon ? (
-                            <span
-                              className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-[9.5px] font-medium uppercase tracking-wide ring-1 ring-inset"
-                              style={{
-                                color: kind.tint,
-                                backgroundColor: `color-mix(in oklab, ${kind.tint} 12%, transparent)`,
-                                // @ts-expect-error CSS custom property for the ring color
-                                "--tw-ring-color": `color-mix(in oklab, ${kind.tint} 30%, transparent)`,
-                              }}
-                            >
-                              <KindIcon className="size-2.5" />
-                              {kind.label}
-                            </span>
-                          ) : null}
-                          {ask ? (
-                            <Hint
-                              label={
-                                ask.resolution
-                                  ? `${MENTION_STATUS_LABELS[ask.status]} — ${ask.resolution}`
-                                  : MENTION_STATUS_LABELS[ask.status]
-                              }
-                            >
+                  <section className="space-y-1.5">
+                    <SectionLabel>Blocked because</SectionLabel>
+                    <p
+                      className="whitespace-pre-wrap break-words border-l-2 pl-3 text-[13.5px] leading-relaxed text-card-foreground"
+                      style={{ borderLeftColor: kindColor("blocked") }}
+                    >
+                      {task.blockedReason ?? "Reason not recorded."}
+                    </p>
+                  </section>
+                )
+              ) : null}
+
+              <Separator />
+
+              {/* Above the thread on purpose: on a card that came out of somebody's
+                  mail, the reply owed back is the point of the card, and the thread
+                  is the conversation *about* it. */}
+              <ResponseBoxes
+                summary={responses}
+                imported={task.sourceRef !== null}
+                busy={draftingReplies}
+                onOpen={(response) => setOpenResponseId(response.id)}
+                onRequestDrafts={() => void requestDrafts()}
+                onCancelDrafts={() => void cancelDrafts()}
+              />
+
+              <Separator />
+
+              <section className="space-y-2">
+                <h3 className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Thread
+                  <span className="rounded-full bg-muted px-1.5 text-[10px]">{comments.length}</span>
+                </h3>
+
+                {/* Says out loud that the ask was registered. Without it a highlighted
+                    word is the only evidence, which is not evidence. */}
+                {openMentions.length > 0 ? (
+                  <div
+                    className="flex items-start gap-2 rounded-md border px-2.5 py-2 text-[12.5px] leading-relaxed"
+                    style={{
+                      borderColor: `color-mix(in oklab, ${MENTION_TINT[openMentions[0]!.status]} 35%, transparent)`,
+                      backgroundColor: `color-mix(in oklab, ${MENTION_TINT[openMentions[0]!.status]} 8%, transparent)`,
+                    }}
+                  >
+                    {openMentions[0]!.status === "claimed" ? (
+                      <Loader2 className="mt-0.5 size-3.5 shrink-0 animate-spin" style={{ color: MENTION_TINT.claimed }} />
+                    ) : (
+                      <Sparkles className="mt-0.5 size-3.5 shrink-0" style={{ color: MENTION_TINT.pending }} />
+                    )}
+                    <div className="min-w-0">
+                      <p className="font-medium" style={{ color: MENTION_TINT[openMentions[0]!.status] }}>
+                        {openMentions.length === 1
+                          ? MENTION_STATUS_LABELS[openMentions[0]!.status]
+                          : `${openMentions.length} requests waiting for Claude`}
+                      </p>
+                      <p className="text-muted-foreground">
+                        {openMentions[0]!.status === "claimed"
+                          ? "Claude is on it and posts each step in the thread below as it goes."
+                          : "Claude answers in this thread — next time it reads the board, or straight away if the mention watcher is running."}
+                      </p>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="space-y-2">
+                  {comments.length === 0 ? (
+                    <p className="py-2 text-xs text-muted-foreground">
+                      No comments yet. Claude posts each step of its work here — and write{" "}
+                      <span className="font-medium text-primary">@claude</span> to ask it for something on this card.
+                    </p>
+                  ) : (
+                    comments.map((comment) => {
+                      const author = users.find((user) => user.id === comment.authorId);
+                      const isAgent = author?.kind === "agent";
+                      const ask = mentionByComment.get(comment.id);
+                      const kind = comment.kind === "note" ? null : COMMENT_KIND[comment.kind];
+                      const KindIcon = kind?.icon;
+                      // A comment that asked for something is left-ruled in its
+                      // request's colour, so the thread shows at a glance which
+                      // notes were asks and which were just notes. A result rules
+                      // itself the same way; a blocker takes the whole card,
+                      // because it is the one comment asking the user to act.
+                      const rule = ask
+                        ? { borderLeftWidth: 2, borderLeftColor: MENTION_TINT[ask.status] }
+                        : comment.kind === "blocker" && kind
+                          ? {
+                              borderLeftWidth: 2,
+                              borderLeftColor: kind.tint,
+                              borderColor: `color-mix(in oklab, ${kind.tint} 40%, transparent)`,
+                              backgroundColor: `color-mix(in oklab, ${kind.tint} 8%, transparent)`,
+                            }
+                          : comment.kind === "result" && kind
+                            ? { borderLeftWidth: 2, borderLeftColor: kind.tint }
+                            : undefined;
+                      return (
+                        <div
+                          key={comment.id}
+                          className={cn(
+                            "rounded-md border p-2.5 text-[13px] leading-relaxed",
+                            isAgent ? "border-primary/25 bg-primary/8" : "border-border/70 bg-surface/60",
+                            // A step in a long run is the background noise of the
+                            // thread; the blocker and the result are the two the
+                            // user came to read, so only those keep full weight.
+                            comment.kind === "progress" && "border-border/60 bg-surface/50",
+                          )}
+                          style={rule}
+                        >
+                          <div className="mb-1 flex items-center gap-2">
+                            <Avatar
+                              name={author?.displayName ?? comment.authorId}
+                              tint={isAgent ? "var(--primary)" : "var(--kind-active)"}
+                              size="sm"
+                            />
+                            <span className="text-xs font-medium">{author?.displayName ?? comment.authorId}</span>
+                            {kind && KindIcon ? (
                               <span
                                 className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-[9.5px] font-medium uppercase tracking-wide ring-1 ring-inset"
                                 style={{
-                                  color: MENTION_TINT[ask.status],
-                                  backgroundColor: `color-mix(in oklab, ${MENTION_TINT[ask.status]} 12%, transparent)`,
+                                  color: kind.tint,
+                                  backgroundColor: `color-mix(in oklab, ${kind.tint} 12%, transparent)`,
                                   // @ts-expect-error CSS custom property for the ring color
-                                  "--tw-ring-color": `color-mix(in oklab, ${MENTION_TINT[ask.status]} 30%, transparent)`,
+                                  "--tw-ring-color": `color-mix(in oklab, ${kind.tint} 30%, transparent)`,
                                 }}
                               >
-                                <AtSign className="size-2.5" />
-                                {MENTION_STATUS_LABELS[ask.status]}
+                                <KindIcon className="size-2.5" />
+                                {kind.label}
                               </span>
-                            </Hint>
+                            ) : null}
+                            {ask ? (
+                              <Hint
+                                label={
+                                  ask.resolution
+                                    ? `${MENTION_STATUS_LABELS[ask.status]} — ${ask.resolution}`
+                                    : MENTION_STATUS_LABELS[ask.status]
+                                }
+                              >
+                                <span
+                                  className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-[9.5px] font-medium uppercase tracking-wide ring-1 ring-inset"
+                                  style={{
+                                    color: MENTION_TINT[ask.status],
+                                    backgroundColor: `color-mix(in oklab, ${MENTION_TINT[ask.status]} 12%, transparent)`,
+                                    // @ts-expect-error CSS custom property for the ring color
+                                    "--tw-ring-color": `color-mix(in oklab, ${MENTION_TINT[ask.status]} 30%, transparent)`,
+                                  }}
+                                >
+                                  <AtSign className="size-2.5" />
+                                  {MENTION_STATUS_LABELS[ask.status]}
+                                </span>
+                              </Hint>
+                            ) : null}
+                            <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+                              <Clock className="size-3" />
+                              {relativeTime(comment.createdAt)}
+                            </span>
+                          </div>
+                          {/* Claude writes markdown; the human writes into a plain
+                              box with no formatting affordance, so reinterpreting
+                              their asterisks would be a change they did not ask
+                              for. Both paths highlight mentions identically. */}
+                          {isAgent ? (
+                            <Markdown text={comment.body} handles={handles} className="text-card-foreground" />
+                          ) : (
+                            <MentionText text={comment.body} handles={handles} className="text-card-foreground" />
+                          )}
+                          {comment.attachments.length > 0 ? (
+                            <div className={cn("flex flex-wrap gap-1.5", comment.body && "mt-2")}>
+                              {comment.attachments.map((image) => (
+                                <a
+                                  key={image.id}
+                                  href={api.commentImageUrl(image.id)}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  title={`${image.filename} — open full size`}
+                                  className="block overflow-hidden rounded border border-border/60 bg-surface/60 transition-colors hover:border-ring/45"
+                                >
+                                  <img
+                                    src={api.commentImageUrl(image.id)}
+                                    alt={image.filename}
+                                    loading="lazy"
+                                    className="h-32 max-w-[16rem] object-cover"
+                                  />
+                                </a>
+                              ))}
+                            </div>
                           ) : null}
-                          <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-muted-foreground">
-                            <Clock className="size-3" />
-                            {relativeTime(comment.createdAt)}
-                          </span>
                         </div>
-                        {/* Claude writes markdown; the human writes into a plain
-                            box with no formatting affordance, so reinterpreting
-                            their asterisks would be a change they did not ask
-                            for. Both paths highlight mentions identically. */}
-                        {isAgent ? (
-                          <Markdown text={comment.body} handles={handles} className="text-card-foreground" />
-                        ) : (
-                          <MentionText text={comment.body} handles={handles} className="text-card-foreground" />
-                        )}
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-
-              <div className="space-y-1.5">
-                <div className="flex items-end gap-2">
-                  <Textarea
-                    ref={draftRef}
-                    value={draft}
-                    onChange={(event) => setDraft(event.target.value)}
-                    placeholder="Leave a note, or @claude to ask for something…  (⌘↵ to send)"
-                    className={cn("min-h-10 flex-1", draftAsksClaude && "border-primary/45")}
-                    rows={2}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                        event.preventDefault();
-                        void postComment();
-                      }
-                    }}
-                  />
-                  <div className="flex flex-col gap-1.5">
-                    <Hint label="Ask Claude to do something on this card" side="left">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={askClaude}
-                        aria-label="Ask Claude"
-                        className={cn(
-                          "justify-center",
-                          draftAsksClaude && "bg-primary/12 text-primary hover:bg-primary/20",
-                        )}
-                      >
-                        <AtSign /> Claude
-                      </Button>
-                    </Hint>
-                    <Button onClick={() => void postComment()} loading={posting} disabled={!draft.trim()} size="sm">
-                      <Send /> Send
-                    </Button>
-                  </div>
-                </div>
-                {/* The one thing worth spelling out: a mention is not just a note. */}
-                <p
-                  className={cn(
-                    "text-[11px] transition-colors",
-                    draftAsksClaude ? "font-medium text-primary" : "text-muted-foreground",
+                      );
+                    })
                   )}
-                >
-                  {draftAsksClaude
-                    ? effectiveProject
-                      ? `Sending this asks Claude to act on it — in ${shortPath(effectiveProject.path)} — and tracks the request until it replies.`
-                      : "Sending this asks Claude to act on it, and tracks the request until it replies."
-                    : "Mentioning @claude turns a comment into a request Claude is expected to carry out."}
+                </div>
+
+              </section>
+
+              <Separator />
+
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] text-muted-foreground">
+                  Updated {relativeTime(task.updatedAt)}
+                  {task.blockedReason ? (
+                    <span className="ml-2 inline-flex items-center gap-1" style={{ color: kindColor("blocked") }}>
+                      <Ban className="size-3" /> blocked
+                    </span>
+                  ) : null}
                 </p>
-              </div>
-            </section>
-
-            <Separator />
-
-            <div className="flex items-center justify-between">
-              <p className="text-[11px] text-muted-foreground">
-                Updated {relativeTime(task.updatedAt)}
-                {task.blockedReason ? (
-                  <span className="ml-2 inline-flex items-center gap-1" style={{ color: kindColor("blocked") }}>
-                    <Ban className="size-3" /> blocked
-                  </span>
+                {editing ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void remove()}
+                    className="text-destructive hover:bg-destructive/10"
+                  >
+                    <Trash2 /> Delete task
+                  </Button>
                 ) : null}
-              </p>
-              {editing ? (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => void remove()}
-                  className="text-destructive hover:bg-destructive/10"
-                >
-                  <Trash2 /> Delete task
-                </Button>
+              </div>
+            </div>
+
+            {/* Pinned under the scrolling body, as a chat's composer is: the thread
+                is the conversation every session on this card shares, and answering
+                it should not mean scrolling back down to find the box. */}
+            <div
+              className={cn(
+                "shrink-0 space-y-1.5 border-t border-border/70 bg-elevated px-6 pb-4 pt-3 transition-colors",
+                dragOver && "bg-primary/8",
+              )}
+              onDragOver={(event) => {
+                if (![...event.dataTransfer.types].includes("Files")) return;
+                event.preventDefault();
+                setDragOver(true);
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(event) => {
+                if (!event.dataTransfer.files.length) return;
+                event.preventDefault();
+                setDragOver(false);
+                addImages(event.dataTransfer.files);
+              }}
+            >
+              {images.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {images.map((entry) => (
+                    <span key={entry.key} className="relative">
+                      <img
+                        src={entry.preview}
+                        alt={entry.file.name}
+                        className="size-14 rounded border border-border/70 object-cover"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => unstageImage(entry.key)}
+                        className="absolute -right-1.5 -top-1.5 grid size-4 place-items-center rounded-full border border-border bg-elevated text-muted-foreground hover:text-foreground"
+                        aria-label={`Remove ${entry.file.name || "image"}`}
+                      >
+                        <X className="size-2.5" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
               ) : null}
+              <Textarea
+                ref={draftRef}
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onPaste={(event) => {
+                  // A screenshot off the clipboard becomes an attachment, not text.
+                  const files = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith("image/"));
+                  if (files.length > 0) {
+                    event.preventDefault();
+                    addImages(files);
+                  }
+                }}
+                placeholder="Leave a note, or @claude to ask for something…  Paste or drop images."
+                className={cn("min-h-16 w-full", draftAsksClaude && "border-primary/45")}
+                rows={2}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    void postComment();
+                  }
+                }}
+              />
+              {/* The actions sit under the box, as in any chat: the box keeps the full
+                  width for what is being written, and Send stays where the eye ends. */}
+              <div className="flex items-center gap-1">
+                <Hint label="Attach images — or paste or drop them here" side="top">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => imageInput.current?.click()}
+                    aria-label="Attach images"
+                    className="h-7 px-2 text-muted-foreground hover:text-foreground"
+                  >
+                    <ImagePlus /> Image
+                  </Button>
+                </Hint>
+                <Hint label="Ask Claude to do something on this card" side="top">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={askClaude}
+                    aria-label="Ask Claude"
+                    className={cn(
+                      "h-7 px-2 text-muted-foreground hover:text-foreground",
+                      draftAsksClaude && "bg-primary/12 text-primary hover:bg-primary/20 hover:text-primary",
+                    )}
+                  >
+                    <AtSign /> Claude
+                  </Button>
+                </Hint>
+                <span className="ml-auto hidden text-[10.5px] text-muted-foreground sm:inline">⌘↵ to send</span>
+                <Button
+                  onClick={() => void postComment()}
+                  loading={posting}
+                  disabled={!draft.trim() && images.length === 0}
+                  size="sm"
+                  className="ml-2"
+                >
+                  <Send /> Send
+                </Button>
+              </div>
+              {/* The one thing worth spelling out: a mention is not just a note. */}
+              <p
+                className={cn(
+                  "text-[11px] transition-colors",
+                  draftAsksClaude ? "font-medium text-primary" : "text-muted-foreground",
+                )}
+              >
+                {draftAsksClaude
+                  ? effectiveProject
+                    ? `Sending this asks Claude to act on it — in ${shortPath(effectiveProject.path)} — and tracks the request until it replies.`
+                    : "Sending this asks Claude to act on it, and tracks the request until it replies."
+                  : "Mentioning @claude turns a comment into a request Claude is expected to carry out."}
+              </p>
+                          <input
+                ref={imageInput}
+                type="file"
+                accept={IMAGE_TYPES.join(",")}
+                multiple
+                className="hidden"
+                onChange={(event) => {
+                  addImages(event.target.files);
+                  event.target.value = "";
+                }}
+              />
             </div>
           </>
         ) : null}
-      </DialogContent>
+      </SheetContent>
 
       {/* A sheet over the dialog rather than a route: the card stays visible
           behind it, which is what makes the message readable in context. */}
@@ -924,7 +1105,7 @@ export function TaskDialog({ taskId, boards, users, projects, revisionKey, onClo
         }}
         onError={onError}
       />
-    </Dialog>
+    </Sheet>
   );
 }
 

@@ -17,7 +17,14 @@ import {
 import { record } from "./activity.ts";
 import { assertDueWithinBoard, getBoard } from "./boards.ts";
 import { getColumn, listColumns, resolveColumn } from "./columns.ts";
-import { insertComment, listComments } from "./comments.ts";
+import {
+  discardCommentImages,
+  insertComment,
+  listComments,
+  removeCommentFiles,
+  stageCommentImages,
+  type CommentImageUpload,
+} from "./comments.ts";
 import type { ActorContext } from "./context.ts";
 import { listMentions, recordMentions } from "./mentions.ts";
 import {
@@ -338,6 +345,7 @@ export function deleteTask(taskId: string, actor: ActorContext): { id: string } 
     record(db, actor, "task.deleted", { boardId: task.boardId, taskId }, { title: task.title });
     db.run("DELETE FROM tasks WHERE id = ?", [taskId]);
   });
+  removeCommentFiles({ boardId: task.boardId, taskId });
   log.warn("task deleted", { taskId, boardId: task.boardId, title: task.title, actor: actor.actorId });
   return { id: taskId };
 }
@@ -476,24 +484,33 @@ export function addCommentWithMentions(
   body: string,
   actor: ActorContext,
   kind: CommentKind = "note",
+  images: CommentImageUpload[] = [],
 ): AddCommentResult {
   const task = getTask(taskId);
   const target = { taskId, boardId: task.boardId };
 
-  const result = write((db) => {
-    const comment = insertComment(db, target, body, actor, kind);
-    // Parsed for every kind, not just notes: the guard that an actor never
-    // enqueues a mention of itself already makes Claude's own narration inert,
-    // and skipping the parse here would silently drop a genuine "@claude" that
-    // one agent left for another in a progress note.
-    const mentions = recordMentions(db, { ...target, commentId: comment.id }, comment.body, actor);
-    return { comment, mentions };
-  });
+  const staged = stageCommentImages(target, images);
+  let result: AddCommentResult;
+  try {
+    result = write((db) => {
+      const comment = insertComment(db, target, body, actor, kind, staged);
+      // Parsed for every kind, not just notes: the guard that an actor never
+      // enqueues a mention of itself already makes Claude's own narration inert,
+      // and skipping the parse here would silently drop a genuine "@claude" that
+      // one agent left for another in a progress note.
+      const mentions = recordMentions(db, { ...target, commentId: comment.id }, comment.body, actor);
+      return { comment, mentions };
+    });
+  } catch (error) {
+    discardCommentImages(staged);
+    throw error;
+  }
 
   log.info("comment added", {
     taskId,
     commentId: result.comment.id,
     kind,
+    images: images.length,
     mentions: result.mentions.length,
     actor: actor.actorId,
     source: actor.source,
@@ -508,8 +525,9 @@ export function addComment(
   body: string,
   actor: ActorContext,
   kind: CommentKind = "note",
+  images: CommentImageUpload[] = [],
 ): TaskComment {
-  return addCommentWithMentions(taskId, body, actor, kind).comment;
+  return addCommentWithMentions(taskId, body, actor, kind, images).comment;
 }
 
 /** Task plus everything needed to act on it without further lookups. */

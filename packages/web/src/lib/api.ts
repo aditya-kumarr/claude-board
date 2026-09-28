@@ -217,11 +217,13 @@ export const api = {
    * the request registered instead of leaving the user to infer it from a
    * highlighted word.
    */
-  addComment: (taskId: string, text: string) =>
+  addComment: (taskId: string, text: string, images: Array<{ filename: string; mime?: string; data: string }> = []) =>
     request<TaskComment & { mentions: Mention[] }>(`/tasks/${taskId}/comments`, {
       method: "POST",
-      ...body({ body: text }),
+      ...body({ body: text, images }),
     }),
+  /** Direct URL, for an `<img>` — not fetched through `request`. */
+  commentImageUrl: (attachmentId: string) => `/api/tasks/attachments/${attachmentId}/content`,
   /* ---- the board's intake chat ----
    * Posting only queues: this process has no model access, so `202` with a pending
    * message is the honest answer and the cards arrive on the revision poll.
